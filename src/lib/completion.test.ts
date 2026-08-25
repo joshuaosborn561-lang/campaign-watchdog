@@ -29,6 +29,19 @@ describe("completion", () => {
     assert.equal(completionPercent(stats), 75);
   });
 
+  it("uses Smartlead analytics drafted_count as remaining", () => {
+    const stats = parseCampaignLeadStats({
+      total_count: "2038",
+      drafted_count: "254",
+      sent_count: "0",
+      unique_sent_count: "1784",
+    });
+    assert.ok(stats);
+    assert.equal(stats.total, 2038);
+    assert.equal(stats.remaining, 254);
+    assert.equal(stats.contacted, 1784);
+  });
+
   it("returns 50/75/90/100 crossings only once", () => {
     assert.deepEqual(thresholdsReached(49.9, [50, 75, 90, 100]), []);
     assert.deepEqual(thresholdsReached(50, [50, 75, 90, 100]), [50]);

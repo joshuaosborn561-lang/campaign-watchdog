@@ -80,7 +80,9 @@ export function parseCampaignSchedule(
     endHour: end.hour,
     endMinute: end.minute,
     gapMinutes: gap > 0 ? gap : defaults.gapMinutes,
-    maxLeadsPerDay: maxLeads != null && maxLeads > 0 ? maxLeads : null,
+    // Smartlead often stores an unused 1000/3000/10000 sending_limit. That is not today's scheduled volume.
+    maxLeadsPerDay:
+      maxLeads != null && maxLeads > 0 && maxLeads < 500 ? maxLeads : null,
   };
 }
 

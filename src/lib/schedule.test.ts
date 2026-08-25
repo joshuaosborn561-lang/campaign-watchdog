@@ -27,6 +27,14 @@ describe("schedule", () => {
     assert.equal(gapLimitedSendsPerInbox(schedule, 30), 30);
   });
 
+  it("ignores dummy Smartlead sending_limit values", () => {
+    const schedule = parseCampaignSchedule(
+      { max_leads_per_day: 10000, sending_limit: 3000 },
+      { timeZone: "America/New_York", gapMinutes: 10 },
+    );
+    assert.equal(schedule.maxLeadsPerDay, null);
+  });
+
   it("caps one inbox at window / 10 minutes", () => {
     const schedule = parseCampaignSchedule(
       { start_hour: "16:00", end_hour: "17:00", min_time_btw_emails: 10 },

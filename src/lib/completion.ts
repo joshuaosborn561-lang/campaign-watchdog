@@ -19,9 +19,11 @@ export function parseCampaignLeadStats(raw: unknown): CampaignLeadStats | null {
   const total =
     pickNumber(root, ["total_leads", "totalLeads", "total_count"]) ??
     pickNumber(leadStats ?? {}, ["total", "total_leads"]);
-  const notStarted = pickNumber(leadStats ?? {}, ["notStarted", "not_started"]);
+  const notStarted =
+    pickNumber(leadStats ?? {}, ["notStarted", "not_started", "drafted", "drafted_count"]) ??
+    pickNumber(root, ["drafted_count", "drafted", "not_started", "leads_not_started"]);
   const contacted =
-    pickNumber(root, ["contacted", "leads_contacted", "contacted_count"]) ??
+    pickNumber(root, ["contacted", "leads_contacted", "contacted_count", "unique_sent_count"]) ??
     (total != null && notStarted != null ? Math.max(0, total - notStarted) : undefined);
   if (total == null || total <= 0) return null;
 
