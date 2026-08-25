@@ -115,6 +115,47 @@ describe("digest", () => {
     assert.doesNotMatch(parlay.line, /EOS Sales DM Choice 28 sent/);
   });
 
+  it("collapses a client when several campaigns all sent nothing", () => {
+    const clients = rollupClients([
+      row({
+        clientName: "SalesGlider",
+        campaignName: "SalesGlider Staffing",
+        sent: 0,
+        remaining: 509,
+        inProgress: 509,
+        staffable: 73,
+        attached: 74,
+        shouldAlert: true,
+        kind: "under_sending",
+      }),
+      row({
+        clientName: "SalesGlider",
+        campaignName: "SalesGlider Staffing Airpods Only",
+        sent: 0,
+        remaining: 79,
+        inProgress: 79,
+        staffable: 0,
+        attached: 0,
+        shouldAlert: true,
+        kind: "not_staffed",
+      }),
+      row({
+        clientName: "SalesGlider",
+        campaignName: "SalesGlider Financial Advisors",
+        sent: 0,
+        remaining: 86,
+        inProgress: 86,
+        staffable: 0,
+        attached: 0,
+        shouldAlert: true,
+        kind: "not_staffed",
+      }),
+    ]);
+    assert.match(clients[0].line, /3 campaigns sent 0/);
+    assert.match(clients[0].line, /\*Staffing\* 509/);
+    assert.doesNotMatch(clients[0].line, /Financial Advisors\* 0 sent/);
+  });
+
   it("keeps Goliath as a short fine line", () => {
     const clients = rollupClients([
       row({

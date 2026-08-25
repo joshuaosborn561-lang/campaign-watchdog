@@ -110,10 +110,10 @@ function buildClient(clientName: string, rows: DigestCampaign[]): ClientDigest {
     rows.some((row) => row.remaining >= 10);
   const stalled = rows.filter(
     (row) =>
-      row.shouldAlert ||
-      (row.sent <= 2 && row.remaining >= 10 && row.staffable >= 3),
+      row.remaining >= 10 &&
+      (row.shouldAlert || (row.sent <= 2 && row.staffable >= 3)),
   );
-  const noInbox = rows.filter((row) => row.attached === 0 && row.remaining >= 5);
+  const noInbox = rows.filter((row) => row.attached === 0 && row.remaining >= 10);
   const dripping = rows.filter(
     (row) =>
       !row.shouldAlert &&
@@ -165,7 +165,18 @@ function buildClient(clientName: string, rows: DigestCampaign[]): ClientDigest {
             `*${shortCampaignName(clientName, row.campaignName)}* has no inbox (${row.remaining.toLocaleString()} in play)`,
         ),
     ];
-    if (callouts.length) parts.push(callouts.join("; "));
+    if (callouts.length >= 3 && stalled.every((row) => row.sent <= 2)) {
+      const leftovers = stalled.map((row) => row.remaining);
+      const biggest = [...stalled].sort((a, b) => b.remaining - a.remaining)[0];
+      parts.push(
+        `${stalled.length} campaigns sent 0 with ${Math.min(...leftovers).toLocaleString()}–${Math.max(...leftovers).toLocaleString()} still in play` +
+          (biggest
+            ? `. Biggest: *${shortCampaignName(clientName, biggest.campaignName)}* ${biggest.remaining.toLocaleString()}`
+            : ""),
+      );
+    } else if (callouts.length) {
+      parts.push(callouts.join("; "));
+    }
   }
 
   const hasProblem = understaffed || stalled.length > 0 || noInbox.length > 0;
