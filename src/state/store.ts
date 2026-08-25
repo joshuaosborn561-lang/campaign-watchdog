@@ -12,6 +12,7 @@ export interface CampaignSnapshot {
 
 export interface WatchdogState {
   campaigns: Record<string, CampaignSnapshot>;
+  lastDigestDay?: string;
   slack?: {
     access_token?: string;
     refresh_token?: string;
@@ -31,6 +32,7 @@ export class StateStore {
       const parsed = JSON.parse(raw) as WatchdogState;
       this.state = {
         campaigns: parsed.campaigns ?? {},
+        lastDigestDay: parsed.lastDigestDay,
         slack: parsed.slack,
       };
     } catch {
@@ -66,5 +68,13 @@ export class StateStore {
 
   setSlackTokens(tokens: { access_token?: string; refresh_token?: string }): void {
     this.state.slack = tokens;
+  }
+
+  lastDigestDay(): string | undefined {
+    return this.state.lastDigestDay;
+  }
+
+  setLastDigestDay(day: string): void {
+    this.state.lastDigestDay = day;
   }
 }

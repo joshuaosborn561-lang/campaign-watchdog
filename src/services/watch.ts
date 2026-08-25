@@ -18,10 +18,12 @@ import {
 } from "../lib/completion.js";
 import { classifyInboxes } from "../lib/inboxes.js";
 import {
-  formatAutobounceMessage,
-  formatCompletionMessage,
-  formatSendingMessage,
-} from "../lib/messages.js";
+  formatDailyDigest,
+  formatFinishedMessage,
+  formatPauseMessage,
+  rollupClients,
+  type DigestCampaign,
+} from "../lib/digest.js";
 import {
   isSendDay,
   parseCampaignSchedule,
@@ -37,6 +39,7 @@ export interface WatchResult {
   completion: number;
   autobounce: number;
   sending: number;
+  digest: number;
   errors: string[];
 }
 
@@ -55,8 +58,11 @@ export class WatchService {
       completion: 0,
       autobounce: 0,
       sending: 0,
+      digest: 0,
       errors: [],
     };
+    const digestRows: DigestCampaign[] = [];
+    let digestPending = 0;
 
     const [campaigns, clients, supabaseCampaigns, registry] = await Promise.all([
       this.smartlead.listCampaigns(),
@@ -88,12 +94,41 @@ export class WatchService {
           day,
           now,
           result,
+          digestRows,
+          onPendingDigest: () => {
+            digestPending += 1;
+          },
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         result.errors.push(`#${campaign.id} ${campaign.name}: ${message}`);
       }
       await sleep(150);
+    }
+
+    if (
+      digestPending === 0 &&
+      digestRows.length &&
+      this.state.lastDigestDay() !== day
+    ) {
+      const text = formatDailyDigest(day, rollupClients(digestRows));
+      if (text) {
+        const key = `digest:v1:${day}`;
+        if (!(await this.alreadySent(key))) {
+          await this.notify(text, {
+            key,
+            campaignId: 0,
+            clientName: "All clients",
+            campaignName: `Daily digest ${day}`,
+            kind: "digest",
+            payload: { day, clients: digestRows.length },
+          });
+          this.state.setLastDigestDay(day);
+          result.digest = 1;
+        } else {
+          this.state.setLastDigestDay(day);
+        }
+      }
     }
 
     await this.state.save();
@@ -109,6 +144,8 @@ export class WatchService {
     day: string;
     now: Date;
     result: WatchResult;
+    digestRows: DigestCampaign[];
+    onPendingDigest: () => void;
   }): Promise<void> {
     const snapshot = this.state.snapshot(input.campaign.id);
     const firstSeen = !snapshot.seen;
@@ -152,16 +189,10 @@ export class WatchService {
             snapshot.notifiedThresholds.push(threshold);
             continue;
           }
+          snapshot.notifiedThresholds.push(threshold);
+          if (threshold < 100) continue;
           await this.notify(
-            formatCompletionMessage({
-              clientName,
-              campaignName,
-              threshold,
-              percent,
-              contacted: stats.contacted,
-              total: stats.total,
-              remaining: stats.remaining,
-            }),
+            formatFinishedMessage({ clientName, campaignName }),
             {
               key,
               campaignId: input.campaign.id,
@@ -171,7 +202,6 @@ export class WatchService {
               payload: { threshold, percent, ...stats },
             },
           );
-          snapshot.notifiedThresholds.push(threshold);
           input.result.completion += 1;
         }
       }
@@ -186,21 +216,24 @@ export class WatchService {
       minSample: this.config.minBounceSample,
     });
     const becamePaused = snapshot.seen && snapshot.status !== "PAUSED" && verdict.paused;
-    const shouldAlertAutobounce =
-      verdict.autobounce &&
-      !firstSeen &&
-      (becamePaused || this.config.alertExistingAutobounce);
-    if (shouldAlertAutobounce) {
-      const key = `autobounce:v1:${input.campaign.id}:${input.day}`;
+    if (!firstSeen && becamePaused) {
+      const key = `pause:v1:${input.campaign.id}:${input.day}`;
       if (!(await this.alreadySent(key))) {
         await this.notify(
-          formatAutobounceMessage({ clientName, campaignName, verdict }),
+          formatPauseMessage({
+            clientName,
+            campaignName,
+            autobounce: verdict.autobounce,
+            bounceRate: verdict.bounceRate,
+            sent: verdict.sent,
+            reason: verdict.reason,
+          }),
           {
             key,
             campaignId: input.campaign.id,
             clientName,
             campaignName,
-            kind: "autobounce",
+            kind: verdict.autobounce ? "autobounce" : "pause",
             payload: { ...verdict },
           },
         );
@@ -219,9 +252,13 @@ export class WatchService {
       );
       const sendDay = isSendDay(schedule, input.now);
       const afterWindow = windowHasEnded(schedule, input.now);
-      if (firstSeen || stats == null || !sendDay || !afterWindow) {
-        if (firstSeen) snapshot.lastSendingAlertDay = input.day;
-      } else {
+      if (firstSeen) {
+        snapshot.lastSendingAlertDay = input.day;
+      } else if (!sendDay) {
+        // not a send day
+      } else if (!afterWindow) {
+        input.onPendingDigest();
+      } else if (stats != null) {
         const accounts = await this.smartlead.getCampaignEmailAccounts(input.campaign.id);
         const inboxes = classifyInboxes(
           accounts.map((row) => ({
@@ -244,32 +281,19 @@ export class WatchService {
           inboxes,
           messagePerDay: this.config.messagePerDay,
         });
-        if (
-          diagnosis?.shouldAlert &&
-          snapshot.lastSendingAlertDay !== input.day
-        ) {
-          const key = `sending:v3:${input.campaign.id}:${input.day}:${diagnosis.kind}`;
-          if (!(await this.alreadySent(key))) {
-            await this.notify(
-              formatSendingMessage({
-                clientName,
-                campaignName,
-                day: input.day,
-                diagnosis,
-              }),
-              {
-                key,
-                campaignId: input.campaign.id,
-                clientName,
-                campaignName,
-                kind: "sending",
-                payload: { day: input.day, ...diagnosis },
-              },
-            );
-            snapshot.lastSendingAlertDay = input.day;
-            input.result.sending += 1;
-          }
-        }
+        input.digestRows.push({
+          clientName,
+          campaignName,
+          sent: sentToday,
+          remaining: stats.remaining,
+          notStarted: stats.notStarted,
+          inProgress: stats.inProgress,
+          staffable: inboxes.staffable,
+          attached: inboxes.attached,
+          kind: diagnosis?.kind ?? "unknown",
+          shouldAlert: Boolean(diagnosis?.shouldAlert),
+        });
+        if (diagnosis?.shouldAlert) input.result.sending += 1;
       }
     }
 

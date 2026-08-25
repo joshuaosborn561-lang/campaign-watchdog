@@ -7,6 +7,11 @@ import {
   parseCampaignSchedule,
   windowHasEnded,
 } from "../src/lib/schedule.js";
+import {
+  formatDailyDigest,
+  rollupClients,
+  type DigestCampaign,
+} from "../src/lib/digest.js";
 import { diagnoseSending } from "../src/lib/sending.js";
 import { ymdInZone } from "../src/lib/time.js";
 import { sleep } from "../src/lib/http.js";
@@ -161,4 +166,23 @@ const other = rows.filter(
 if (other.length) {
   console.log(`\nOTHER ${other.length}`);
   for (const r of other) console.log(line(r));
+}
+
+const digestRows: DigestCampaign[] = rows
+  .filter((r) => r.remaining != null)
+  .map((r) => ({
+    clientName: r.client,
+    campaignName: r.name,
+    sent: r.sent,
+    remaining: r.remaining ?? 0,
+    notStarted: r.notStarted ?? 0,
+    inProgress: r.inProgress ?? 0,
+    staffable: r.staffable,
+    attached: r.attached,
+    kind: (r.kind as DigestCampaign["kind"]) ?? "unknown",
+    shouldAlert: ["not_staffed", "inboxes_down", "under_sending"].includes(r.kind),
+  }));
+const digest = formatDailyDigest(day, rollupClients(digestRows));
+if (digest) {
+  console.log("\nDIGEST\n" + digest);
 }
