@@ -1,83 +1,103 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { sendingShortfall, sendingTarget, shouldCheckSending } from "./sending.js";
+import { diagnoseSending } from "./sending.js";
+import type { CampaignSchedule } from "./schedule.js";
 
-describe("sending", () => {
-  it("scales the 30/day target by inbox count", () => {
-    assert.equal(sendingTarget(10, 30), 300);
-    assert.equal(sendingTarget(1, 30), 30);
-    assert.equal(sendingTarget(0, 30), 0);
-  });
+const weekdayWindow: CampaignSchedule = {
+  timeZone: "America/New_York",
+  days: [1, 2, 3, 4, 5],
+  startHour: 9,
+  startMinute: 0,
+  endHour: 17,
+  endMinute: 0,
+  gapMinutes: 10,
+  maxLeadsPerDay: null,
+};
 
-  it("flags a campaign under 30 per inbox when enough leads remain", () => {
-    const miss = sendingShortfall({
-      inboxCount: 8,
-      sent: 200,
-      perInboxTarget: 30,
-      remaining: 900,
+describe("sending diagnosis", () => {
+  it("does not alert Parlay when today's scheduled cap is all that went out", () => {
+    const result = diagnoseSending({
+      sent: 15,
+      remaining: 420,
+      schedule: { ...weekdayWindow, maxLeadsPerDay: 15 },
+      inboxes: { attached: 40, staffable: 38, disconnected: 2, inboxesThatSent: 12 },
+      messagePerDay: 30,
     });
-    assert.ok(miss);
-    assert.equal(miss.expected, 240);
-    assert.equal(miss.shortBy, 40);
-    assert.equal(miss.cappedByLeads, false);
-    assert.equal(
-      sendingShortfall({
-        inboxCount: 8,
-        sent: 240,
-        perInboxTarget: 30,
-        remaining: 900,
-      }),
-      null,
-    );
+    assert.ok(result);
+    assert.equal(result.shouldAlert, false);
+    assert.equal(result.kind, "ok_scheduled");
+    assert.match(result.reason, /scheduled today/i);
   });
 
-  it("caps the daily target at remaining leads", () => {
-    const miss = sendingShortfall({
-      inboxCount: 10,
+  it("does not alert when the campaign only had 15 leads left", () => {
+    const result = diagnoseSending({
+      sent: 15,
+      remaining: 15,
+      schedule: weekdayWindow,
+      inboxes: { attached: 20, staffable: 20, disconnected: 0, inboxesThatSent: 8 },
+      messagePerDay: 30,
+    });
+    assert.ok(result);
+    assert.equal(result.shouldAlert, false);
+    assert.match(result.reason, /left to send/i);
+  });
+
+  it("alerts TechEvo-style one send on a thin staff", () => {
+    const result = diagnoseSending({
+      sent: 1,
+      remaining: 842,
+      schedule: weekdayWindow,
+      inboxes: { attached: 1, staffable: 1, disconnected: 0, inboxesThatSent: 1 },
+      messagePerDay: 30,
+    });
+    assert.ok(result);
+    assert.equal(result.shouldAlert, true);
+    assert.equal(result.kind, "not_staffed");
+    assert.match(result.reason, /1 staffable inbox/i);
+    assert.ok(result.receipts.some((line) => /10 min gap/i.test(line)));
+  });
+
+  it("alerts when many inboxes are attached but SMTP is down", () => {
+    const result = diagnoseSending({
       sent: 2,
-      perInboxTarget: 30,
-      remaining: 5,
+      remaining: 500,
+      schedule: weekdayWindow,
+      inboxes: { attached: 20, staffable: 2, disconnected: 18, inboxesThatSent: 1 },
+      messagePerDay: 30,
     });
-    assert.ok(miss);
-    assert.equal(miss.expected, 5);
-    assert.equal(miss.shortBy, 3);
-    assert.equal(miss.cappedByLeads, true);
-    assert.equal(
-      sendingShortfall({
-        inboxCount: 10,
-        sent: 5,
-        perInboxTarget: 30,
-        remaining: 5,
-      }),
-      null,
-    );
-    assert.equal(
-      sendingShortfall({
-        inboxCount: 10,
-        sent: 0,
-        perInboxTarget: 30,
-        remaining: 0,
-      }),
-      null,
-    );
-    assert.equal(
-      sendingShortfall({ inboxCount: 10, sent: 0, perInboxTarget: 30 }),
-      null,
-    );
+    assert.ok(result);
+    assert.equal(result.shouldAlert, true);
+    assert.equal(result.kind, "inboxes_down");
   });
 
-  it("waits until the configured hour and skips weekends", () => {
+  it("treats a 10-minute gap ceiling as fine, not a shortfall", () => {
+    const shortWindow: CampaignSchedule = {
+      ...weekdayWindow,
+      startHour: 16,
+      endHour: 17,
+    };
+    const result = diagnoseSending({
+      sent: 6,
+      remaining: 400,
+      schedule: shortWindow,
+      inboxes: { attached: 1, staffable: 1, disconnected: 0, inboxesThatSent: 1 },
+      messagePerDay: 30,
+    });
+    assert.ok(result);
+    assert.equal(result.shouldAlert, false);
+    assert.equal(result.kind, "ok_gap_limited");
+  });
+
+  it("does not invent a miss when remaining is unknown", () => {
     assert.equal(
-      shouldCheckSending({ hour: 16, afterHour: 17, weekend: false }),
-      false,
-    );
-    assert.equal(
-      shouldCheckSending({ hour: 17, afterHour: 17, weekend: false }),
-      true,
-    );
-    assert.equal(
-      shouldCheckSending({ hour: 18, afterHour: 17, weekend: true }),
-      false,
+      diagnoseSending({
+        sent: 0,
+        remaining: null,
+        schedule: weekdayWindow,
+        inboxes: { attached: 10, staffable: 10, disconnected: 0, inboxesThatSent: 0 },
+        messagePerDay: 30,
+      }),
+      null,
     );
   });
 });

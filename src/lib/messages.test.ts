@@ -40,44 +40,37 @@ describe("messages", () => {
     assert.match(text, /autobounce/i);
   });
 
-  it("includes inbox math on sending shortfalls", () => {
+  it("states the reason and receipts for a send miss", () => {
     const text = formatSendingMessage({
-      clientName: "SalesGlider",
-      campaignName: "SalesGlider Staffing",
-      day: "2026-08-24",
-      shortfall: {
-        inboxCount: 10,
-        expected: 300,
-        sent: 180,
-        shortBy: 120,
-        perInboxTarget: 30,
-        remaining: 400,
-        inboxCapacity: 300,
-        cappedByLeads: false,
+      clientName: "TechEvolution",
+      campaignName: "TechEvo New England Red Sox",
+      day: "2026-08-25",
+      diagnosis: {
+        kind: "not_staffed",
+        shouldAlert: true,
+        reason: "Only 1 staffable inbox and 1 send with 842 leads left.",
+        receipts: [
+          "Sent 1 today",
+          "842 leads left in the campaign",
+          "1 staffable / 1 attached",
+          "10 min gap between sends → 30 sends/inbox (30/day cap)",
+        ],
+        sent: 1,
+        remaining: 842,
+        attached: 1,
+        staffable: 1,
+        disconnected: 0,
+        inboxesThatSent: 1,
+        campaignCap: null,
+        gapMinutes: 10,
+        perInboxGapCap: 30,
+        inboxCapacity: 30,
+        schedulable: 30,
       },
     });
-    assert.match(text, /\*SalesGlider\* — \*SalesGlider Staffing\*/);
-    assert.match(text, /10 inboxes × 30/);
-    assert.match(text, /400 leads left/);
-  });
-
-  it("says the target was capped by remaining leads", () => {
-    const text = formatSendingMessage({
-      clientName: "Vasco Warranty",
-      campaignName: "Vasco - Signal - Warranty Admin Hiring",
-      day: "2026-08-24",
-      shortfall: {
-        inboxCount: 10,
-        expected: 5,
-        sent: 2,
-        shortBy: 3,
-        perInboxTarget: 30,
-        remaining: 5,
-        inboxCapacity: 300,
-        cappedByLeads: true,
-      },
-    });
-    assert.match(text, /only 5 leads are left/);
-    assert.match(text, /Short by 3/);
+    assert.match(text, /\*TechEvolution\* — \*TechEvo New England Red Sox\*/);
+    assert.match(text, /Only 1 staffable inbox/);
+    assert.match(text, /842 leads left/);
+    assert.match(text, /10 min gap/);
   });
 });

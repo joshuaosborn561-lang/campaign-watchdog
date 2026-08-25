@@ -25,6 +25,10 @@ export interface SmartleadEmailAccount {
   message_per_day?: number;
   max_email_per_day?: number;
   daily_sent_count?: number;
+  is_smtp_success?: boolean;
+  is_imap_success?: boolean;
+  minTimeToWaitInMins?: number;
+  time_to_wait_in_mins?: number;
 }
 
 export class SmartleadClient {
@@ -81,6 +85,10 @@ export class SmartleadClient {
       message_per_day: asNumber(row.message_per_day),
       max_email_per_day: asNumber(row.max_email_per_day),
       daily_sent_count: asNumber(row.daily_sent_count),
+      is_smtp_success: row.is_smtp_success === false ? false : true,
+      is_imap_success: row.is_imap_success === false ? false : true,
+      minTimeToWaitInMins: asNumber(row.minTimeToWaitInMins),
+      time_to_wait_in_mins: asNumber(row.time_to_wait_in_mins),
     }));
   }
 }

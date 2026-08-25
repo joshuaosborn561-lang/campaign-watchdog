@@ -4,7 +4,7 @@ Railway app that pings Slack when a Smartlead campaign:
 
 - hits **50% / 75% / 90% / 100%** completion
 - **pauses from autobounce**
-- sends under `min(30 × inboxes, leads remaining)` that day
+- under-sends **for a real reason** (unstaffed, inboxes down, or far below what the schedule + 10-min gap allowed) — not just “short by N”
 
 Every Slack message names the **client** and **campaign**.
 
@@ -16,9 +16,9 @@ A cron (every 15 minutes) walks ACTIVE/PAUSED Smartlead campaigns.
 
 | Alert | When it fires |
 | --- | --- |
-| Completion | Lead contacted / total crosses 50, 75, 90, or ~100%. First observation is seeded so a deploy does not dump historical crossings. |
+| Completion | Lead contacted / total crosses 50, 75, 90, or ~100%. First observation is seeded with no Slack. |
 | Autobounce | Campaign newly becomes `PAUSED` and bounce rate is at/over Smartlead's `bounce_auto_pause_threshold` (default 5%), or Smartlead labels the pause as autobounce. |
-| Sending | After 5pm America/New_York on weekdays: today's sent count is below `min(30 × inboxes, leads remaining)`. A campaign with 5 leads left is not "short 295". First observation is seeded with no Slack. |
+| Sending | After that campaign's send window ends: diagnose why volume is low. Slack only if it's unstaffed, SMTP/IMAP down, or far below what leads + daily cap + 10-min gap allowed. A Parlay campaign that only had 15 scheduled does not alert. |
 
 Client names come from campaignintelligence (`public.campaigns.client_name`) with fallbacks to `_meta.client_registry` and Smartlead `/client/`.
 

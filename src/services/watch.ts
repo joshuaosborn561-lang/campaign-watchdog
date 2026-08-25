@@ -2,7 +2,6 @@ import type { AppConfig } from "../config.js";
 import {
   SmartleadClient,
   clientDisplayName,
-  inboxCountOf,
   sleep,
   type SmartleadCampaign,
   type SmartleadClientRecord,
@@ -17,13 +16,20 @@ import {
   parseSentCount,
   thresholdsReached,
 } from "../lib/completion.js";
+import { classifyInboxes } from "../lib/inboxes.js";
 import {
   formatAutobounceMessage,
   formatCompletionMessage,
   formatSendingMessage,
 } from "../lib/messages.js";
-import { sendingShortfall, shouldCheckSending } from "../lib/sending.js";
-import { hourInZone, isWeekendInZone, ymdInZone } from "../lib/time.js";
+import {
+  isSendDay,
+  parseCampaignSchedule,
+  windowHasEnded,
+} from "../lib/schedule.js";
+import { diagnoseSending } from "../lib/sending.js";
+import { unwrap } from "../lib/parse.js";
+import { ymdInZone } from "../lib/time.js";
 import type { StateStore } from "../state/store.js";
 
 export interface WatchResult {
@@ -66,13 +72,6 @@ export class WatchService {
     const clientsById = new Map(clients.map((client) => [client.id, client]));
     const watch = new Set(this.config.watchStatuses);
     const day = ymdInZone(now, this.config.sendShortfallTimezone);
-    const hour = hourInZone(now, this.config.sendShortfallTimezone);
-    const weekend = isWeekendInZone(now, this.config.sendShortfallTimezone);
-    const checkSending = shouldCheckSending({
-      hour,
-      afterHour: this.config.sendShortfallAfterHour,
-      weekend,
-    });
 
     for (const campaign of campaigns) {
       const status = String(campaign.status ?? "").toUpperCase();
@@ -87,7 +86,7 @@ export class WatchService {
           supabaseCampaigns,
           registry,
           day,
-          checkSending,
+          now,
           result,
         });
       } catch (error) {
@@ -108,7 +107,7 @@ export class WatchService {
     supabaseCampaigns: Map<number, CampaignNameRow>;
     registry: Map<number, string>;
     day: string;
-    checkSending: boolean;
+    now: Date;
     result: WatchResult;
   }): Promise<void> {
     const snapshot = this.state.snapshot(input.campaign.id);
@@ -210,32 +209,53 @@ export class WatchService {
       }
     }
 
-    if (input.status === "ACTIVE" && input.checkSending) {
-      if (firstSeen || stats == null) {
-        snapshot.lastSendingAlertDay = input.day;
+    if (input.status === "ACTIVE") {
+      const schedule = parseCampaignSchedule(
+        { ...(unwrap(settings) ?? {}), ...(unwrap(detail) ?? {}) },
+        {
+          timeZone: this.config.sendShortfallTimezone,
+          gapMinutes: this.config.mailboxMinTimeGapMins,
+        },
+      );
+      const sendDay = isSendDay(schedule, input.now);
+      const afterWindow = windowHasEnded(schedule, input.now);
+      if (firstSeen || stats == null || !sendDay || !afterWindow) {
+        if (firstSeen) snapshot.lastSendingAlertDay = input.day;
       } else {
         const accounts = await this.smartlead.getCampaignEmailAccounts(input.campaign.id);
-        const inboxes = inboxCountOf(accounts);
+        const inboxes = classifyInboxes(
+          accounts.map((row) => ({
+            id: row.id,
+            email: row.from_email ?? row.email ?? row.username,
+            smtpOk: row.is_smtp_success !== false,
+            imapOk: row.is_imap_success !== false,
+            dailySent: row.daily_sent_count ?? 0,
+          })),
+        );
         const sentToday = parseSentCount(
           await this.smartlead
             .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
             .catch(() => analytics),
         );
-        const shortfall = sendingShortfall({
-          inboxCount: inboxes,
+        const diagnosis = diagnoseSending({
           sent: sentToday,
-          perInboxTarget: this.config.messagePerDay,
           remaining: stats.remaining,
+          schedule,
+          inboxes,
+          messagePerDay: this.config.messagePerDay,
         });
-        if (shortfall && snapshot.lastSendingAlertDay !== input.day) {
-          const key = `sending:v2:${input.campaign.id}:${input.day}`;
+        if (
+          diagnosis?.shouldAlert &&
+          snapshot.lastSendingAlertDay !== input.day
+        ) {
+          const key = `sending:v3:${input.campaign.id}:${input.day}:${diagnosis.kind}`;
           if (!(await this.alreadySent(key))) {
             await this.notify(
               formatSendingMessage({
                 clientName,
                 campaignName,
                 day: input.day,
-                shortfall,
+                diagnosis,
               }),
               {
                 key,
@@ -243,7 +263,7 @@ export class WatchService {
                 clientName,
                 campaignName,
                 kind: "sending",
-                payload: { day: input.day, ...shortfall },
+                payload: { day: input.day, ...diagnosis },
               },
             );
             snapshot.lastSendingAlertDay = input.day;

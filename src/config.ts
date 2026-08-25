@@ -52,6 +52,7 @@ export interface AppConfig {
   supabaseUrl: string;
   supabaseServiceRoleKey: string;
   messagePerDay: number;
+  mailboxMinTimeGapMins: number;
   completionThresholds: number[];
   sendShortfallAfterHour: number;
   sendShortfallTimezone: string;
@@ -88,6 +89,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       supabaseUrl: optional("SUPABASE_URL"),
       supabaseServiceRoleKey: optional("SUPABASE_SERVICE_ROLE_KEY"),
       messagePerDay: optionalNumber("MESSAGE_PER_DAY", 30),
+      mailboxMinTimeGapMins: optionalNumber("MAILBOX_MIN_TIME_GAP_MINS", 10),
       completionThresholds: csvNumbers("COMPLETION_THRESHOLDS", [50, 75, 90, 100]),
       sendShortfallAfterHour: optionalNumber("SEND_SHORTFALL_AFTER_HOUR", 17),
       sendShortfallTimezone: optional("SEND_SHORTFALL_TIMEZONE", "America/New_York"),

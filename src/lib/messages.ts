@@ -1,5 +1,5 @@
 import type { AutobounceVerdict } from "./autobounce.js";
-import type { SendingShortfall } from "./sending.js";
+import type { SendingDiagnosis } from "./sending.js";
 
 export function formatClientCampaign(clientName: string, campaignName: string): string {
   return `*${clientName}* — *${campaignName}*`;
@@ -43,16 +43,12 @@ export function formatSendingMessage(input: {
   clientName: string;
   campaignName: string;
   day: string;
-  shortfall: SendingShortfall;
+  diagnosis: SendingDiagnosis;
 }): string {
   const who = formatClientCampaign(input.clientName, input.campaignName);
-  const inboxBit = `${input.shortfall.inboxCount} inbox${input.shortfall.inboxCount === 1 ? "" : "es"} × ${input.shortfall.perInboxTarget}`;
-  const cap = input.shortfall.cappedByLeads
-    ? `target ${input.shortfall.expected.toLocaleString()} because only ${input.shortfall.remaining.toLocaleString()} leads are left (${inboxBit} would be ${input.shortfall.inboxCapacity.toLocaleString()})`
-    : `target ${input.shortfall.expected.toLocaleString()} (${inboxBit}, ${input.shortfall.remaining.toLocaleString()} leads left)`;
+  const bullets = input.diagnosis.receipts.map((line) => `• ${line}`).join("\n");
   return [
-    `${who} is under today's send target for ${input.day}.`,
-    `Sent ${input.shortfall.sent.toLocaleString()} of ${cap}.`,
-    `Short by ${input.shortfall.shortBy.toLocaleString()}.`,
-  ].join(" ");
+    `${who} sent ${input.diagnosis.sent.toLocaleString()} on ${input.day}. ${input.diagnosis.reason}`,
+    bullets,
+  ].join("\n");
 }
