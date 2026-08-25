@@ -42,6 +42,24 @@ describe("completion", () => {
     assert.equal(stats.contacted, 1784);
   });
 
+  it("counts in-progress follow-ups, not just notStarted", () => {
+    const stats = parseCampaignLeadStats({
+      total_count: "1815",
+      drafted_count: "1081",
+      unique_sent_count: "553",
+      campaign_lead_stats: {
+        total: 553,
+        notStarted: 0,
+        inprogress: 393,
+        completed: 29,
+      },
+    });
+    assert.ok(stats);
+    assert.equal(stats.remaining, 393);
+    assert.equal(stats.notStarted, 0);
+    assert.equal(stats.inProgress, 393);
+  });
+
   it("returns 50/75/90/100 crossings only once", () => {
     assert.deepEqual(thresholdsReached(49.9, [50, 75, 90, 100]), []);
     assert.deepEqual(thresholdsReached(50, [50, 75, 90, 100]), [50]);

@@ -88,6 +88,31 @@ describe("sending diagnosis", () => {
     assert.equal(result.kind, "ok_gap_limited");
   });
 
+  it("does not alert Parlay-style drips just because inboxes could send more", () => {
+    const result = diagnoseSending({
+      sent: 14,
+      remaining: 338,
+      schedule: weekdayWindow,
+      inboxes: { attached: 18, staffable: 18, disconnected: 0, inboxesThatSent: 10 },
+      messagePerDay: 30,
+    });
+    assert.ok(result);
+    assert.equal(result.shouldAlert, false);
+  });
+
+  it("alerts when a staffed campaign sent nothing with leads still in play", () => {
+    const result = diagnoseSending({
+      sent: 0,
+      remaining: 79,
+      schedule: weekdayWindow,
+      inboxes: { attached: 74, staffable: 73, disconnected: 1, inboxesThatSent: 0 },
+      messagePerDay: 30,
+    });
+    assert.ok(result);
+    assert.equal(result.shouldAlert, true);
+    assert.equal(result.kind, "under_sending");
+  });
+
   it("does not invent a miss when remaining is unknown", () => {
     assert.equal(
       diagnoseSending({

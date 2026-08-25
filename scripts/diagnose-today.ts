@@ -31,6 +31,8 @@ type Row = {
   status: string;
   sent: number;
   remaining: number | null;
+  notStarted: number | null;
+  inProgress: number | null;
   staffable: number;
   attached: number;
   disconnected: number;
@@ -87,6 +89,8 @@ for (const campaign of campaigns) {
       status,
       sent,
       remaining: stats?.remaining ?? null,
+      notStarted: stats?.notStarted ?? null,
+      inProgress: stats?.inProgress ?? null,
       staffable: inboxes.staffable,
       attached: inboxes.attached,
       disconnected: inboxes.disconnected,
@@ -102,6 +106,8 @@ for (const campaign of campaigns) {
       status,
       sent: -1,
       remaining: null,
+      notStarted: null,
+      inProgress: null,
       staffable: 0,
       attached: 0,
       disconnected: 0,
@@ -124,7 +130,10 @@ function line(r: Row): string {
   return [
     `${r.client} — ${r.name}`,
     `sent ${r.sent}` +
-      (r.remaining != null ? `, ${r.remaining} left` : "") +
+      (r.remaining != null ? `, ${r.remaining} in play` : "") +
+      (r.notStarted != null || r.inProgress != null
+        ? ` (new ${r.notStarted ?? 0}, follow-up ${r.inProgress ?? 0})`
+        : "") +
       (r.cap != null ? `, daily cap ${r.cap}` : ""),
     `staffed ${r.staffable}/${r.attached}` +
       (r.disconnected ? ` (${r.disconnected} down)` : ""),

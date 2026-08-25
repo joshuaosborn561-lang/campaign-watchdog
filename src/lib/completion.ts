@@ -4,6 +4,8 @@ export interface CampaignLeadStats {
   total: number;
   contacted: number;
   remaining: number;
+  notStarted: number;
+  inProgress: number;
   replied: number;
   bounced: number;
   sent: number;
@@ -20,22 +22,37 @@ export function parseCampaignLeadStats(raw: unknown): CampaignLeadStats | null {
     pickNumber(root, ["total_leads", "totalLeads", "total_count"]) ??
     pickNumber(leadStats ?? {}, ["total", "total_leads"]);
   const notStarted =
-    pickNumber(leadStats ?? {}, ["notStarted", "not_started", "drafted", "drafted_count"]) ??
-    pickNumber(root, ["drafted_count", "drafted", "not_started", "leads_not_started"]);
-  const contacted =
-    pickNumber(root, ["contacted", "leads_contacted", "contacted_count", "unique_sent_count"]) ??
-    (total != null && notStarted != null ? Math.max(0, total - notStarted) : undefined);
+    pickNumber(leadStats ?? {}, ["notStarted", "not_started"]) ??
+    pickNumber(root, ["not_started", "leads_not_started"]);
+  const inProgress = pickNumber(leadStats ?? {}, [
+    "inprogress",
+    "in_progress",
+    "inProgress",
+  ]);
+  const drafted = pickNumber(root, ["drafted_count", "drafted"]);
+  const contacted = pickNumber(root, [
+    "contacted",
+    "leads_contacted",
+    "contacted_count",
+    "unique_sent_count",
+  ]);
   if (total == null || total <= 0) return null;
 
+  // notStarted is only new leads. Follow-ups sit in inprogress. drafted_count
+  // is often total-sent and overstates what can still send.
   const remaining =
-    notStarted ??
-    (contacted != null ? Math.max(0, total - contacted) : undefined);
+    notStarted != null || inProgress != null
+      ? Math.max(0, (notStarted ?? 0) + (inProgress ?? 0))
+      : drafted ??
+        (contacted != null ? Math.max(0, total - contacted) : undefined);
   if (remaining == null) return null;
 
   return {
     total,
     contacted: contacted ?? Math.max(0, total - remaining),
     remaining,
+    notStarted: notStarted ?? 0,
+    inProgress: inProgress ?? 0,
     replied: pickNumber(root, ["replied", "leads_replied", "reply_count"]) ?? 0,
     bounced: pickNumber(root, ["bounced", "bounce_count", "total_bounced"]) ?? 0,
     sent: pickNumber(root, ["sent", "sent_count", "total_sent", "leads_contacted"]) ?? 0,

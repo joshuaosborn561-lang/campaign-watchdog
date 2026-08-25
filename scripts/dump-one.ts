@@ -8,7 +8,9 @@ const [campaign, stats, analytics, today] = await Promise.all([
   smartlead.getCampaign(id),
   smartlead.getCampaignStatistics(id).catch((e) => ({ error: String(e) })),
   smartlead.getCampaignAnalytics(id).catch((e) => ({ error: String(e) })),
-  smartlead.getCampaignAnalyticsByDate(id, "2026-08-25", "2026-08-25").catch((e) => ({ error: String(e) })),
+  smartlead
+    .getCampaignAnalyticsByDate(id, "2026-08-25", "2026-08-25")
+    .catch((e) => ({ error: String(e) })),
 ]);
 
 function keys(raw: unknown): unknown {

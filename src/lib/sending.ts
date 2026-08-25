@@ -150,10 +150,12 @@ export function diagnoseSending(input: {
     );
   }
 
-  if (schedulable >= 10 && input.sent < Math.max(3, Math.floor(schedulable * 0.25))) {
+  // A small send on a fat list is usually Smartlead's daily drip, not a miss.
+  // Only call a stall when a staffed campaign sent almost nothing.
+  if (input.inboxes.staffable >= 3 && remaining >= 10 && input.sent <= 2) {
     return problem(
       "under_sending",
-      `Staffed for ${schedulable.toLocaleString()} today but only sent ${input.sent}.`,
+      `Staffed with ${input.inboxes.staffable} inboxes and ${remaining.toLocaleString()} leads still in play, but only sent ${input.sent}.`,
       receipts,
       input,
       { remaining, campaignCap, perInboxGapCap, inboxCapacity, schedulable },

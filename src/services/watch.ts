@@ -128,9 +128,9 @@ export class WatchService {
     ]);
 
     const stats =
+      parseCampaignLeadStats(analytics) ??
       parseCampaignLeadStats(statistics) ??
-      parseCampaignLeadStats(detail) ??
-      parseCampaignLeadStats(analytics);
+      parseCampaignLeadStats(detail);
 
     if (stats) {
       const percent = completionPercent(stats);
