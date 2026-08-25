@@ -186,10 +186,11 @@ export class WatchService {
       fallbackThreshold: this.config.bounceAutoPauseThreshold,
       minSample: this.config.minBounceSample,
     });
-    const becamePaused = snapshot.status !== "PAUSED" && verdict.paused;
+    const becamePaused = snapshot.seen && snapshot.status !== "PAUSED" && verdict.paused;
     const shouldAlertAutobounce =
       verdict.autobounce &&
-      ((firstSeen && this.config.alertExistingAutobounce) || becamePaused);
+      !firstSeen &&
+      (becamePaused || this.config.alertExistingAutobounce);
     if (shouldAlertAutobounce) {
       const key = `autobounce:v1:${input.campaign.id}:${input.day}`;
       if (!(await this.alreadySent(key))) {
@@ -210,39 +211,44 @@ export class WatchService {
     }
 
     if (input.status === "ACTIVE" && input.checkSending) {
-      const accounts = await this.smartlead.getCampaignEmailAccounts(input.campaign.id);
-      const inboxes = inboxCountOf(accounts);
-      const sentToday = parseSentCount(
-        await this.smartlead
-          .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
-          .catch(() => analytics),
-      );
-      const shortfall = sendingShortfall({
-        inboxCount: inboxes,
-        sent: sentToday,
-        perInboxTarget: this.config.messagePerDay,
-      });
-      if (shortfall && snapshot.lastSendingAlertDay !== input.day) {
-        const key = `sending:v1:${input.campaign.id}:${input.day}`;
-        if (!(await this.alreadySent(key))) {
-          await this.notify(
-            formatSendingMessage({
-              clientName,
-              campaignName,
-              day: input.day,
-              shortfall,
-            }),
-            {
-              key,
-              campaignId: input.campaign.id,
-              clientName,
-              campaignName,
-              kind: "sending",
-              payload: { day: input.day, ...shortfall },
-            },
-          );
-          snapshot.lastSendingAlertDay = input.day;
-          input.result.sending += 1;
+      if (firstSeen || stats == null) {
+        snapshot.lastSendingAlertDay = input.day;
+      } else {
+        const accounts = await this.smartlead.getCampaignEmailAccounts(input.campaign.id);
+        const inboxes = inboxCountOf(accounts);
+        const sentToday = parseSentCount(
+          await this.smartlead
+            .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
+            .catch(() => analytics),
+        );
+        const shortfall = sendingShortfall({
+          inboxCount: inboxes,
+          sent: sentToday,
+          perInboxTarget: this.config.messagePerDay,
+          remaining: stats.remaining,
+        });
+        if (shortfall && snapshot.lastSendingAlertDay !== input.day) {
+          const key = `sending:v2:${input.campaign.id}:${input.day}`;
+          if (!(await this.alreadySent(key))) {
+            await this.notify(
+              formatSendingMessage({
+                clientName,
+                campaignName,
+                day: input.day,
+                shortfall,
+              }),
+              {
+                key,
+                campaignId: input.campaign.id,
+                clientName,
+                campaignName,
+                kind: "sending",
+                payload: { day: input.day, ...shortfall },
+              },
+            );
+            snapshot.lastSendingAlertDay = input.day;
+            input.result.sending += 1;
+          }
         }
       }
     }

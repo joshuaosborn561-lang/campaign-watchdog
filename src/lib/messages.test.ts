@@ -51,10 +51,33 @@ describe("messages", () => {
         sent: 180,
         shortBy: 120,
         perInboxTarget: 30,
+        remaining: 400,
+        inboxCapacity: 300,
+        cappedByLeads: false,
       },
     });
     assert.match(text, /\*SalesGlider\* — \*SalesGlider Staffing\*/);
     assert.match(text, /10 inboxes × 30/);
-    assert.match(text, /180 of 300/);
+    assert.match(text, /400 leads left/);
+  });
+
+  it("says the target was capped by remaining leads", () => {
+    const text = formatSendingMessage({
+      clientName: "Vasco Warranty",
+      campaignName: "Vasco - Signal - Warranty Admin Hiring",
+      day: "2026-08-24",
+      shortfall: {
+        inboxCount: 10,
+        expected: 5,
+        sent: 2,
+        shortBy: 3,
+        perInboxTarget: 30,
+        remaining: 5,
+        inboxCapacity: 300,
+        cappedByLeads: true,
+      },
+    });
+    assert.match(text, /only 5 leads are left/);
+    assert.match(text, /Short by 3/);
   });
 });

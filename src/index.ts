@@ -85,8 +85,6 @@ async function main(): Promise<void> {
   cron.schedule(config.cron, () => {
     void runOnce("cron");
   });
-
-  void runOnce("boot");
 }
 
 main().catch((error) => {

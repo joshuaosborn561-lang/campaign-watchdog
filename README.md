@@ -4,7 +4,7 @@ Railway app that pings Slack when a Smartlead campaign:
 
 - hits **50% / 75% / 90% / 100%** completion
 - **pauses from autobounce**
-- sends **under 30 emails per inbox that day** (target = `30 × inbox count` for that campaign)
+- sends under `min(30 × inboxes, leads remaining)` that day
 
 Every Slack message names the **client** and **campaign**.
 
@@ -18,7 +18,7 @@ A cron (every 15 minutes) walks ACTIVE/PAUSED Smartlead campaigns.
 | --- | --- |
 | Completion | Lead contacted / total crosses 50, 75, 90, or ~100%. First observation is seeded so a deploy does not dump historical crossings. |
 | Autobounce | Campaign newly becomes `PAUSED` and bounce rate is at/over Smartlead's `bounce_auto_pause_threshold` (default 5%), or Smartlead labels the pause as autobounce. |
-| Sending | After 5pm America/New_York on weekdays: today's sent count is below `MESSAGE_PER_DAY × attached inboxes`. One alert per campaign per day. |
+| Sending | After 5pm America/New_York on weekdays: today's sent count is below `min(30 × inboxes, leads remaining)`. A campaign with 5 leads left is not "short 295". First observation is seeded with no Slack. |
 
 Client names come from campaignintelligence (`public.campaigns.client_name`) with fallbacks to `_meta.client_registry` and Smartlead `/client/`.
 
