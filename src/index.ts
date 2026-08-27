@@ -78,6 +78,33 @@ async function main(): Promise<void> {
     res.json({ ok: true });
   });
 
+  const runPulse = async (reason: string) => {
+    if (running) {
+      console.log(`[watchdog] skip ${reason}: already running`);
+      return;
+    }
+    running = true;
+    try {
+      const pulse = await watch.runPulse();
+      console.log(
+        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients}`,
+      );
+    } catch (error) {
+      console.error("[watchdog] pulse failed", error);
+    } finally {
+      running = false;
+    }
+  };
+
+  app.post("/pulse", async (req, res) => {
+    if (config.runToken && req.header("x-run-token") !== config.runToken) {
+      res.status(401).json({ ok: false, error: "unauthorized" });
+      return;
+    }
+    await runPulse("manual-pulse");
+    res.json({ ok: true });
+  });
+
   app.listen(config.port, config.host, () => {
     console.log(`[watchdog] listening on ${config.host}:${config.port}`);
   });
@@ -85,6 +112,13 @@ async function main(): Promise<void> {
   cron.schedule(config.cron, () => {
     void runOnce("cron");
   });
+  cron.schedule(
+    config.pulseCron,
+    () => {
+      void runPulse("pulse");
+    },
+    { timezone: config.sendShortfallTimezone },
+  );
 }
 
 main().catch((error) => {

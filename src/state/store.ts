@@ -13,6 +13,7 @@ export interface CampaignSnapshot {
 export interface WatchdogState {
   campaigns: Record<string, CampaignSnapshot>;
   lastDigestDay?: string;
+  lastPulseSlot?: string;
   slack?: {
     access_token?: string;
     refresh_token?: string;
@@ -33,6 +34,7 @@ export class StateStore {
       this.state = {
         campaigns: parsed.campaigns ?? {},
         lastDigestDay: parsed.lastDigestDay,
+        lastPulseSlot: parsed.lastPulseSlot,
         slack: parsed.slack,
       };
     } catch {
@@ -76,5 +78,13 @@ export class StateStore {
 
   setLastDigestDay(day: string): void {
     this.state.lastDigestDay = day;
+  }
+
+  lastPulseSlot(): string | undefined {
+    return this.state.lastPulseSlot;
+  }
+
+  setLastPulseSlot(slot: string): void {
+    this.state.lastPulseSlot = slot;
   }
 }

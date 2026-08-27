@@ -30,8 +30,15 @@ import {
   windowHasEnded,
 } from "../lib/schedule.js";
 import { diagnoseSending } from "../lib/sending.js";
+import {
+  formatClientPulse,
+  isPulseWindow,
+  parseTodayVolume,
+  pulseSlot,
+  rollupClientPulse,
+} from "../lib/pulse.js";
 import { unwrap } from "../lib/parse.js";
-import { ymdInZone } from "../lib/time.js";
+import { hourInZone, ymdInZone } from "../lib/time.js";
 import type { StateStore } from "../state/store.js";
 
 export interface WatchResult {
@@ -133,6 +140,78 @@ export class WatchService {
 
     await this.state.save();
     return result;
+  }
+
+  async runPulse(now = new Date()): Promise<{ posted: boolean; clients: number }> {
+    const timeZone = this.config.sendShortfallTimezone;
+    if (!isPulseWindow(now, timeZone, this.config.pulseHours, this.config.pulseWeekdays)) {
+      return { posted: false, clients: 0 };
+    }
+
+    const day = ymdInZone(now, timeZone);
+    const hour = hourInZone(now, timeZone);
+    const slot = pulseSlot(day, hour);
+    const key = `pulse:v1:${slot}`;
+    if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
+      this.state.setLastPulseSlot(slot);
+      return { posted: false, clients: 0 };
+    }
+
+    const [campaigns, clients, supabaseCampaigns, registry] = await Promise.all([
+      this.smartlead.listCampaigns(),
+      this.smartlead.listClients().catch(() => [] as SmartleadClientRecord[]),
+      this.supabase.enabled()
+        ? this.supabase.fetchCampaignNames().catch(() => new Map<number, CampaignNameRow>())
+        : Promise.resolve(new Map<number, CampaignNameRow>()),
+      this.supabase.enabled()
+        ? this.supabase.fetchClientRegistry().catch(() => new Map<number, string>())
+        : Promise.resolve(new Map<number, string>()),
+    ]);
+    const clientsById = new Map(clients.map((client) => [client.id, client]));
+    const rows: Array<{ clientName: string; sent: number; bounced: number }> = [];
+
+    for (const campaign of campaigns) {
+      const status = String(campaign.status ?? "").toUpperCase();
+      if (status !== "ACTIVE" && status !== "PAUSED") continue;
+      try {
+        const today = await this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day);
+        const volume = parseTodayVolume(today);
+        rows.push({
+          clientName: resolveClientName(campaign, clientsById, supabaseCampaigns, registry),
+          sent: volume.sent,
+          bounced: volume.bounced,
+        });
+      } catch (error) {
+        console.warn(
+          `[watchdog] pulse #${campaign.id} ${campaign.name}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+      await sleep(120);
+    }
+
+    const rolled = rollupClientPulse(rows);
+    if (!rolled.length) return { posted: false, clients: 0 };
+
+    await this.notify(
+      formatClientPulse({
+        day,
+        hour,
+        clients: rolled,
+        bounceWarn: this.config.bounceAutoPauseThreshold,
+      }),
+      {
+        key,
+        campaignId: 0,
+        clientName: "All clients",
+        campaignName: `Client pulse ${slot}`,
+        kind: "pulse",
+        payload: { day, hour, clients: rolled },
+      },
+    );
+    this.state.setLastPulseSlot(slot);
+    await this.state.save();
+    return { posted: true, clients: rolled.length };
   }
 
   private async inspectCampaign(input: {
