@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  classifyTodaySends,
   formatDailyDigest,
   formatFinishedMessage,
   formatPauseMessage,
@@ -19,6 +20,7 @@ function row(partial: Partial<DigestCampaign> & Pick<DigestCampaign, "clientName
     attached: 1,
     kind: "ok_on_pace",
     shouldAlert: false,
+    status: "ACTIVE",
     ...partial,
   };
 }
@@ -35,7 +37,18 @@ describe("digest", () => {
     );
   });
 
-  it("rolls TechEvo up as a client staffing problem", () => {
+  it("treats unstarted-lead sends as new and in-sequence sends as follow-up", () => {
+    assert.deepEqual(
+      classifyTodaySends({ sent: 28, notStarted: 311, inProgress: 27 }),
+      { firstTouch: 28, followUp: 0 },
+    );
+    assert.deepEqual(
+      classifyTodaySends({ sent: 80, notStarted: 0, inProgress: 393 }),
+      { firstTouch: 0, followUp: 80 },
+    );
+  });
+
+  it("rolls TechEvo up as a client staffing problem and still says how many sent", () => {
     const clients = rollupClients([
       row({
         clientName: "TechEvolution",
@@ -59,20 +72,19 @@ describe("digest", () => {
       row({
         clientName: "TechEvolution",
         campaignName: "TechEvo SFL IT DM AirPods",
-        sent: 5,
+        sent: 15,
         remaining: 133,
-        notStarted: 128,
-        inProgress: 5,
+        notStarted: 118,
+        inProgress: 15,
       }),
     ]);
     assert.equal(clients[0].severity, "problem");
-    assert.match(clients[0].line, /\*TechEvolution\*/);
+    assert.match(clients[0].line, /\*TechEvolution\* — 16 sent/);
     assert.match(clients[0].line, /1 inbox on every campaign/);
-    assert.match(clients[0].line, /New England Red Sox 0 sent/);
-    assert.doesNotMatch(clients[0].line, /TechEvo SFL IT DM AirPods/);
+    assert.match(clients[0].line, /New England Red Sox/);
   });
 
-  it("names one stalled Parlay campaign and leaves the drip at the client", () => {
+  it("names one stalled Parlay campaign and states first-touch volume", () => {
     const clients = rollupClients([
       row({
         clientName: "Parlay Tech",
@@ -109,10 +121,9 @@ describe("digest", () => {
     const parlay = clients.find((item) => item.clientName === "Parlay Tech");
     assert.ok(parlay);
     assert.equal(parlay.severity, "problem");
-    assert.match(parlay.line, /dripped 12–28/);
+    assert.match(parlay.line, /40 sent, all new/);
     assert.match(parlay.line, /\*Sports Offer - copy\*/);
-    assert.match(parlay.line, /0 sent \/ 1,178 follow-ups/);
-    assert.doesNotMatch(parlay.line, /EOS Sales DM Choice 28 sent/);
+    assert.match(parlay.line, /1,178 follow-ups waiting/);
   });
 
   it("collapses a client when several campaigns all sent nothing", () => {
@@ -151,12 +162,12 @@ describe("digest", () => {
         kind: "not_staffed",
       }),
     ]);
+    assert.match(clients[0].line, /0 sent/);
     assert.match(clients[0].line, /3 campaigns sent 0/);
     assert.match(clients[0].line, /\*Staffing\* 509/);
-    assert.doesNotMatch(clients[0].line, /Financial Advisors\* 0 sent/);
   });
 
-  it("keeps Goliath as a short fine line", () => {
+  it("keeps Goliath as a short volume line", () => {
     const clients = rollupClients([
       row({
         clientName: "Goliath Cybersecurity",
@@ -178,16 +189,42 @@ describe("digest", () => {
       }),
     ]);
     assert.equal(clients[0].severity, "fine");
-    assert.match(clients[0].line, /sending \(13–80\)/);
+    assert.match(clients[0].line, /93 sent, all follow-up/);
   });
 
-  it("writes a short daily post with problems first", () => {
-    const text = formatDailyDigest("2026-08-25", [
-      { clientName: "TechEvolution", severity: "problem", line: "*TechEvolution* — 1 inbox on every campaign." },
-      { clientName: "Goliath Cybersecurity", severity: "fine", line: "*Goliath Cybersecurity* — sending (13–80)." },
+  it("opens the daily post with totals, paused, and finished", () => {
+    const text = formatDailyDigest("2026-08-27", [
+      row({
+        clientName: "Goliath Cybersecurity",
+        campaignName: "Goliath Displacement L 501-1000 ITDir",
+        sent: 80,
+        remaining: 393,
+        inProgress: 393,
+        staffable: 91,
+        attached: 91,
+      }),
+      row({
+        clientName: "Parlay Tech",
+        campaignName: "Old list",
+        sent: 5,
+        remaining: 0,
+        staffable: 10,
+        attached: 10,
+      }),
+      row({
+        clientName: "Vasco Warranty",
+        campaignName: "Vasco - Signal - Warranty Admin Hiring",
+        sent: 0,
+        remaining: 40,
+        inProgress: 40,
+        status: "PAUSED",
+      }),
     ]);
-    assert.match(text ?? "", /Tue 8\/25/);
-    assert.ok((text ?? "").indexOf("TechEvolution") < (text ?? "").indexOf("Fine"));
+    assert.match(text ?? "", /Thu 8\/27/);
+    assert.match(text ?? "", /\*85 sent today\* \(0 new · 85 follow-up\)/);
+    assert.match(text ?? "", /Paused: \*Vasco Warranty\* Signal - Warranty Admin Hiring/);
+    assert.match(text ?? "", /Finished today: \*Parlay Tech\* Old list/);
+    assert.match(text ?? "", /\*Goliath Cybersecurity\* — 80 sent, all follow-up/);
   });
 
   it("singles out a paused campaign", () => {

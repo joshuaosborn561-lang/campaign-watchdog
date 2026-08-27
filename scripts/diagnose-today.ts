@@ -9,7 +9,6 @@ import {
 } from "../src/lib/schedule.js";
 import {
   formatDailyDigest,
-  rollupClients,
   type DigestCampaign,
 } from "../src/lib/digest.js";
 import { diagnoseSending } from "../src/lib/sending.js";
@@ -182,7 +181,7 @@ const digestRows: DigestCampaign[] = rows
     kind: (r.kind as DigestCampaign["kind"]) ?? "unknown",
     shouldAlert: ["not_staffed", "inboxes_down", "under_sending"].includes(r.kind),
   }));
-const digest = formatDailyDigest(day, rollupClients(digestRows));
+const digest = formatDailyDigest(day, digestRows);
 if (digest) {
   console.log("\nDIGEST\n" + digest);
 }

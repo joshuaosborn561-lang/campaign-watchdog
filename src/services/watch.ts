@@ -21,7 +21,6 @@ import {
   formatDailyDigest,
   formatFinishedMessage,
   formatPauseMessage,
-  rollupClients,
   type DigestCampaign,
 } from "../lib/digest.js";
 import {
@@ -113,14 +112,10 @@ export class WatchService {
       await sleep(150);
     }
 
-    if (
-      digestPending === 0 &&
-      digestRows.length &&
-      this.state.lastDigestDay() !== day
-    ) {
-      const text = formatDailyDigest(day, rollupClients(digestRows));
+    if (digestPending === 0 && digestRows.length) {
+      const text = formatDailyDigest(day, digestRows);
       if (text) {
-        const key = `digest:v1:${day}`;
+        const key = `digest:v2:${day}`;
         if (!(await this.alreadySent(key))) {
           await this.notify(text, {
             key,
@@ -371,9 +366,29 @@ export class WatchService {
           attached: inboxes.attached,
           kind: diagnosis?.kind ?? "unknown",
           shouldAlert: Boolean(diagnosis?.shouldAlert),
+          status: "ACTIVE",
         });
         if (diagnosis?.shouldAlert) input.result.sending += 1;
       }
+    } else if (input.status === "PAUSED" && stats) {
+      const sentToday = parseSentCount(
+        await this.smartlead
+          .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
+          .catch(() => analytics),
+      );
+      input.digestRows.push({
+        clientName,
+        campaignName,
+        sent: sentToday,
+        remaining: stats.remaining,
+        notStarted: stats.notStarted,
+        inProgress: stats.inProgress,
+        staffable: 0,
+        attached: 0,
+        kind: "unknown",
+        shouldAlert: false,
+        status: "PAUSED",
+      });
     }
 
     snapshot.status = input.status;

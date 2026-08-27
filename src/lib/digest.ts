@@ -11,6 +11,7 @@ export interface DigestCampaign {
   attached: number;
   kind: SendingKind | "unknown";
   shouldAlert: boolean;
+  status?: string;
 }
 
 export interface ClientDigest {
@@ -49,9 +50,56 @@ export function shortCampaignName(clientName: string, campaignName: string): str
   return name || campaignName;
 }
 
+/** Today's sends: first-touch if the campaign still has unstarted leads, else follow-up. */
+export function classifyTodaySends(row: {
+  sent: number;
+  notStarted: number;
+  inProgress: number;
+}): { firstTouch: number; followUp: number } {
+  if (row.sent <= 0) return { firstTouch: 0, followUp: 0 };
+  if (row.notStarted <= 0) return { firstTouch: 0, followUp: row.sent };
+  if (row.inProgress <= row.sent) return { firstTouch: row.sent, followUp: 0 };
+  if (row.notStarted >= row.inProgress) return { firstTouch: row.sent, followUp: 0 };
+  return { firstTouch: 0, followUp: row.sent };
+}
+
+export function digestTotals(campaigns: DigestCampaign[]): {
+  sent: number;
+  firstTouch: number;
+  followUp: number;
+  waitingNew: number;
+  waitingFollowUp: number;
+  finishedToday: DigestCampaign[];
+  paused: DigestCampaign[];
+} {
+  let sent = 0;
+  let firstTouch = 0;
+  let followUp = 0;
+  let waitingNew = 0;
+  let waitingFollowUp = 0;
+  const finishedToday: DigestCampaign[] = [];
+  const paused: DigestCampaign[] = [];
+  for (const row of campaigns) {
+    if (String(row.status ?? "ACTIVE").toUpperCase() === "PAUSED") {
+      paused.push(row);
+    }
+    sent += row.sent;
+    const split = classifyTodaySends(row);
+    firstTouch += split.firstTouch;
+    followUp += split.followUp;
+    waitingNew += Math.max(0, row.notStarted);
+    waitingFollowUp += Math.max(0, row.inProgress);
+    if (row.sent > 0 && row.remaining <= 0 && row.notStarted <= 0 && row.inProgress <= 0) {
+      finishedToday.push(row);
+    }
+  }
+  return { sent, firstTouch, followUp, waitingNew, waitingFollowUp, finishedToday, paused };
+}
+
 export function rollupClients(campaigns: DigestCampaign[]): ClientDigest[] {
   const groups = new Map<string, DigestCampaign[]>();
   for (const campaign of campaigns) {
+    if (String(campaign.status ?? "ACTIVE").toUpperCase() === "PAUSED") continue;
     const list = groups.get(campaign.clientName) ?? [];
     list.push(campaign);
     groups.set(campaign.clientName, list);
@@ -59,18 +107,29 @@ export function rollupClients(campaigns: DigestCampaign[]): ClientDigest[] {
 
   return [...groups.entries()]
     .map(([clientName, rows]) => buildClient(clientName, rows))
+    .filter((row) => row.severity !== "quiet")
     .sort((a, b) => rank(a.severity) - rank(b.severity) || a.clientName.localeCompare(b.clientName));
 }
 
-export function formatDailyDigest(day: string, clients: ClientDigest[]): string | null {
+export function formatDailyDigest(day: string, campaigns: DigestCampaign[]): string | null {
+  if (!campaigns.length) return null;
+  const totals = digestTotals(campaigns);
+  const clients = rollupClients(campaigns);
+  const lines = [
+    `*${formatDayLabel(day)}*`,
+    `*${totals.sent.toLocaleString()} sent today* (${totals.firstTouch.toLocaleString()} new · ${totals.followUp.toLocaleString()} follow-up)`,
+    `Still waiting: ${totals.waitingNew.toLocaleString()} new · ${totals.waitingFollowUp.toLocaleString()} follow-up`,
+    `Paused: ${formatNameList(totals.paused)}`,
+    `Finished today: ${formatNameList(totals.finishedToday)}`,
+  ];
   const problems = clients.filter((row) => row.severity === "problem");
   const fine = clients.filter((row) => row.severity === "fine");
-  if (!problems.length && !fine.length) return null;
-
-  const lines = [`*${formatDayLabel(day)}*`];
-  for (const row of problems) lines.push(row.line);
+  if (problems.length) {
+    lines.push("*Watch*");
+    for (const row of problems) lines.push(row.line);
+  }
   if (fine.length) {
-    lines.push("*Fine*");
+    lines.push("*Sent fine*");
     for (const row of fine) lines.push(row.line);
   }
   return lines.join("\n");
@@ -104,6 +163,9 @@ export function formatFinishedMessage(input: {
 }
 
 function buildClient(clientName: string, rows: DigestCampaign[]): ClientDigest {
+  const sent = rows.reduce((sum, row) => sum + row.sent, 0);
+  const firstTouch = rows.reduce((sum, row) => sum + classifyTodaySends(row).firstTouch, 0);
+  const followUp = rows.reduce((sum, row) => sum + classifyTodaySends(row).followUp, 0);
   const understaffed =
     rows.length > 0 &&
     rows.every((row) => row.attached > 0 && row.staffable <= 1) &&
@@ -114,112 +176,74 @@ function buildClient(clientName: string, rows: DigestCampaign[]): ClientDigest {
       (row.shouldAlert || (row.sent <= 2 && row.staffable >= 3)),
   );
   const noInbox = rows.filter((row) => row.attached === 0 && row.remaining >= 10);
-  const dripping = rows.filter(
-    (row) =>
-      !row.shouldAlert &&
-      row.sent >= 8 &&
-      row.sent <= 40 &&
-      row.remaining >= 50 &&
-      row.staffable >= 5,
-  );
-  const sending = rows.filter((row) => row.sent >= 8 && row.staffable >= 5 && !row.shouldAlert);
-  const gapLimited = rows.filter((row) => row.kind === "ok_gap_limited");
 
-  const parts: string[] = [];
+  const volume = formatClientVolume(sent, firstTouch, followUp);
+  const flags: string[] = [];
+  if (understaffed) flags.push("1 inbox on every campaign");
 
-  if (understaffed) {
-    parts.push("1 inbox on every campaign");
-    const worst = [...rows]
-      .filter((row) => row.remaining >= 10 && row.sent <= 2)
-      .sort((a, b) => a.sent - b.sent || b.remaining - a.remaining)
-      .slice(0, 3)
-      .map((row) => campaignReceipt(clientName, row));
-    if (worst.length) parts.push(worst.join("; "));
-    if (gapLimited.length) {
-      parts.push(
-        `${shortCampaignName(clientName, gapLimited[0].campaignName)} hit the gap cap (${gapLimited[0].sent} sent)`,
-      );
-    }
-  } else {
-    if (dripping.length && stalled.length) {
-      const sends = dripping.map((row) => row.sent);
-      parts.push(`new campaigns dripped ${Math.min(...sends)}–${Math.max(...sends)}`);
-    } else if (dripping.length && !stalled.length && dripping.length === rows.length) {
-      const sends = dripping.map((row) => row.sent);
-      parts.push(`dripped ${Math.min(...sends)}–${Math.max(...sends)}`);
-    } else if (sending.length && !stalled.length && !noInbox.length) {
-      const sends = sending.map((row) => row.sent);
-      parts.push(`sending (${Math.min(...sends)}–${Math.max(...sends)})`);
-    }
-
-    const callouts = [
-      ...stalled.map((row) => {
-        const who = `*${shortCampaignName(clientName, row.campaignName)}*`;
-        if (row.staffable <= 0) return `${who} has no inbox (${row.remaining.toLocaleString()} in play)`;
-        return `${who} ${campaignReceipt(clientName, row, false)}`;
-      }),
-      ...noInbox
-        .filter((row) => !stalled.includes(row))
-        .map(
-          (row) =>
-            `*${shortCampaignName(clientName, row.campaignName)}* has no inbox (${row.remaining.toLocaleString()} in play)`,
-        ),
-    ];
-    if (callouts.length >= 3 && stalled.every((row) => row.sent <= 2)) {
-      const leftovers = stalled.map((row) => row.remaining);
-      const biggest = [...stalled].sort((a, b) => b.remaining - a.remaining)[0];
-      parts.push(
-        `${stalled.length} campaigns sent 0 with ${Math.min(...leftovers).toLocaleString()}–${Math.max(...leftovers).toLocaleString()} still in play` +
-          (biggest
-            ? `. Biggest: *${shortCampaignName(clientName, biggest.campaignName)}* ${biggest.remaining.toLocaleString()}`
-            : ""),
-      );
-    } else if (callouts.length) {
-      parts.push(callouts.join("; "));
-    }
+  const callouts = [
+    ...stalled.map((row) => leftoverCallout(clientName, row)),
+    ...noInbox
+      .filter((row) => !stalled.includes(row))
+      .map(
+        (row) =>
+          `*${shortCampaignName(clientName, row.campaignName)}* has no inbox (${row.remaining.toLocaleString()} left)`,
+      ),
+  ];
+  if (callouts.length >= 3 && stalled.every((row) => row.sent <= 2)) {
+    const leftovers = stalled.map((row) => row.remaining);
+    const biggest = [...stalled].sort((a, b) => b.remaining - a.remaining)[0];
+    flags.push(
+      `${stalled.length} campaigns sent 0 with ${Math.min(...leftovers).toLocaleString()}–${Math.max(...leftovers).toLocaleString()} left` +
+        (biggest
+          ? `. Biggest: *${shortCampaignName(clientName, biggest.campaignName)}* ${biggest.remaining.toLocaleString()}`
+          : ""),
+    );
+  } else if (callouts.length) {
+    flags.push(callouts.join("; "));
   }
 
   const hasProblem = understaffed || stalled.length > 0 || noInbox.length > 0;
-  const hasFine =
-    !hasProblem && (sending.length > 0 || dripping.length > 0 || gapLimited.length > 0);
   const leftover = rows.reduce((sum, row) => sum + row.remaining, 0);
-  const sent = rows.reduce((sum, row) => sum + row.sent, 0);
-
-  if (!parts.length) {
-    if (leftover < 10 && sent <= 2) {
-      return { clientName, severity: "quiet", line: `*${clientName}* — effectively done.` };
-    }
-    if (sent > 0) {
-      return {
-        clientName,
-        severity: "fine",
-        line: `*${clientName}* — sent ${sent.toLocaleString()}.`,
-      };
-    }
-    return { clientName, severity: "quiet", line: `*${clientName}* — nothing due.` };
+  if (!hasProblem && sent <= 0 && leftover < 10) {
+    return { clientName, severity: "quiet", line: `*${clientName}* — ${volume}.` };
   }
 
+  const extra = flags.length ? `. ${flags.join(". ")}` : "";
   return {
     clientName,
-    severity: hasProblem ? "problem" : hasFine ? "fine" : "quiet",
-    line: `*${clientName}* — ${parts.join(". ")}.`,
+    severity: hasProblem ? "problem" : "fine",
+    line: `*${clientName}* — ${volume}${extra}.`,
   };
 }
 
-function campaignReceipt(
-  clientName: string,
-  row: DigestCampaign,
-  includeName = true,
-): string {
-  const label = includeName ? shortCampaignName(clientName, row.campaignName) : "";
-  const play =
+function formatClientVolume(sent: number, firstTouch: number, followUp: number): string {
+  if (sent <= 0) return "0 sent";
+  if (firstTouch > 0 && followUp > 0) {
+    return `${sent.toLocaleString()} sent (${firstTouch.toLocaleString()} new · ${followUp.toLocaleString()} follow-up)`;
+  }
+  if (firstTouch > 0) return `${sent.toLocaleString()} sent, all new`;
+  return `${sent.toLocaleString()} sent, all follow-up`;
+}
+
+function leftoverCallout(clientName: string, row: DigestCampaign): string {
+  const who = `*${shortCampaignName(clientName, row.campaignName)}*`;
+  if (row.staffable <= 0) return `${who} has no inbox (${row.remaining.toLocaleString()} left)`;
+  const kind =
     row.notStarted > 0 && row.inProgress === 0
-      ? `${row.notStarted.toLocaleString()} new`
+      ? `${row.notStarted.toLocaleString()} new waiting`
       : row.notStarted === 0 && row.inProgress > 0
-        ? `${row.inProgress.toLocaleString()} follow-ups`
-        : `${row.remaining.toLocaleString()} in play`;
-  const body = `${row.sent} sent / ${play}`;
-  return label ? `${label} ${body}` : body;
+        ? `${row.inProgress.toLocaleString()} follow-ups waiting`
+        : `${row.remaining.toLocaleString()} waiting`;
+  return `${who} ${row.sent} sent, ${kind}`;
+}
+
+function formatNameList(rows: DigestCampaign[]): string {
+  if (!rows.length) return "none";
+  return rows
+    .slice(0, 6)
+    .map((row) => `*${row.clientName}* ${shortCampaignName(row.clientName, row.campaignName)}`)
+    .join("; ") + (rows.length > 6 ? ` +${rows.length - 6} more` : "");
 }
 
 function formatDayLabel(ymd: string): string {
