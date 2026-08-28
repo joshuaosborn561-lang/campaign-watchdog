@@ -39,6 +39,35 @@ describe("client pulse", () => {
     assert.match(text, /\*SalesGlider\* — 40 sent · \*10\.0% bounce\*/);
     assert.match(text, /\*Culture Fits\* — 0 sent/);
     assert.match(text, /Total 145 sent · 4\.1% bounce/);
+    assert.doesNotMatch(text, /Paused/);
+  });
+
+  it("names every paused campaign on the 2-hour pulse", () => {
+    const text = formatClientPulse({
+      day: "2026-08-27",
+      hour: 10,
+      bounceWarn: 5,
+      clients: [{ clientName: "Bolder Cyber Partners", sent: 0, bounced: 0 }],
+      paused: [
+        {
+          clientName: "Bolder Cyber Partners",
+          campaignName: "BCP Healthcare Under-1k (With Team)",
+        },
+        {
+          clientName: "Bolder Cyber Partners",
+          campaignName: "BCP Generic (No Team)",
+        },
+        {
+          clientName: "Vasco Warranty",
+          campaignName: "Vasco - Signal - Warranty Admin Hiring",
+        },
+      ],
+    });
+    assert.match(text, /Thu 8\/27 10:00am — sent today/);
+    assert.match(text, /\*Paused\* \(3\)/);
+    assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
+    assert.match(text, /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(With Team\)/);
+    assert.match(text, /• \*Vasco Warranty\* — Signal - Warranty Admin Hiring/);
   });
 
   it("reads today's sent and bounce from analytics-by-date", () => {

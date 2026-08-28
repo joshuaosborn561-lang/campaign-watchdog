@@ -1,5 +1,8 @@
+import { shortCampaignName } from "./names.js";
 import type { SendingKind } from "./sending.js";
 import { bouncePercent } from "./pulse.js";
+
+export { shortCampaignName };
 
 export interface DigestCampaign {
   clientName: string;
@@ -20,36 +23,6 @@ export interface ClientDigest {
   clientName: string;
   severity: "problem" | "fine" | "quiet";
   line: string;
-}
-
-export function shortCampaignName(clientName: string, campaignName: string): string {
-  let name = campaignName.trim();
-  const prefixes = [
-    clientName,
-    ...clientName.split(/[\s/]+/).filter((part) => part.length > 3),
-    "TechEvo",
-    "TechEvolution",
-    "Peterson",
-    "Roofs by Peterson",
-    "Vasco Warranty",
-    "Vasco",
-    "Goliath Cybersecurity",
-    "Goliath",
-    "Parlay Tech",
-    "Parlay2",
-    "Parlay",
-    "SalesGlider",
-    "Bolder Cyber Partners",
-    "BCP",
-    "Culture Fits",
-    "TJ",
-  ];
-  for (const prefix of prefixes) {
-    const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    name = name.replace(new RegExp(`^${escaped}[\\s\\-–:]+`, "i"), "");
-  }
-  name = name.replace(/^[\s\-–:]+/, "").replace(/\s+/g, " ").trim();
-  return name || campaignName;
 }
 
 /** Today's sends: first-touch if the campaign still has unstarted leads, else follow-up. */

@@ -1,10 +1,16 @@
 import { bounceRateFrom } from "./autobounce.js";
+import { shortCampaignName } from "./names.js";
 import { hourInZone, weekdayInZone } from "./time.js";
 
 export interface ClientPulse {
   clientName: string;
   sent: number;
   bounced: number;
+}
+
+export interface PausedPulseRow {
+  clientName: string;
+  campaignName: string;
 }
 
 export function rollupClientPulse(
@@ -60,6 +66,7 @@ export function formatClientPulse(input: {
   hour: number;
   clients: ClientPulse[];
   bounceWarn: number;
+  paused?: PausedPulseRow[];
 }): string {
   const totalSent = input.clients.reduce((sum, row) => sum + row.sent, 0);
   const totalBounced = input.clients.reduce((sum, row) => sum + row.bounced, 0);
@@ -72,6 +79,19 @@ export function formatClientPulse(input: {
     `Total ${totalSent.toLocaleString()} sent` +
       (overall != null ? ` · ${formatPct(overall)} bounce` : ""),
   );
+  const paused = [...(input.paused ?? [])].sort(
+    (a, b) =>
+      a.clientName.localeCompare(b.clientName) ||
+      a.campaignName.localeCompare(b.campaignName),
+  );
+  if (paused.length) {
+    lines.push("");
+    lines.push(`*Paused* (${paused.length})`);
+    for (const row of paused) {
+      const campaign = shortCampaignName(row.clientName, row.campaignName);
+      lines.push(`• *${row.clientName}* — ${campaign}`);
+    }
+  }
   return lines.join("\n");
 }
 

@@ -87,7 +87,7 @@ async function main(): Promise<void> {
     try {
       const pulse = await watch.runPulse();
       console.log(
-        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients}`,
+        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} paused=${pulse.paused}`,
       );
     } catch (error) {
       console.error("[watchdog] pulse failed", error);

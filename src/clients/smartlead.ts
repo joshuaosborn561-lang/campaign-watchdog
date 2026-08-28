@@ -71,6 +71,16 @@ export class SmartleadClient {
     });
   }
 
+  updateCampaignStatus(
+    campaignId: number,
+    status: "START" | "PAUSED" | "STOPPED",
+  ): Promise<unknown> {
+    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/status`, {
+      method: "POST",
+      body: { status },
+    });
+  }
+
   async getCampaignEmailAccounts(campaignId: number): Promise<SmartleadEmailAccount[]> {
     const raw = await apiRequest<unknown>(
       BASE_URL,
