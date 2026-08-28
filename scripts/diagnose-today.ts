@@ -1,4 +1,5 @@
 import { SmartleadClient } from "../src/clients/smartlead.js";
+import { isNoiseCampaign } from "../src/lib/names.js";
 import { classifyInboxes } from "../src/lib/inboxes.js";
 import { parseCampaignLeadStats, parseSentCount } from "../src/lib/completion.js";
 import { parseTodayVolume } from "../src/lib/pulse.js";
@@ -52,6 +53,7 @@ const rows: Row[] = [];
 
 for (const campaign of campaigns) {
   const status = String(campaign.status ?? "").toUpperCase();
+  if (isNoiseCampaign(campaign.name)) continue;
   if (status !== "ACTIVE") continue;
   try {
     const [detail, analytics, today, statistics, accounts] = await Promise.all([

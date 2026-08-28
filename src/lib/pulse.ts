@@ -90,7 +90,9 @@ export function formatClientPulse(input: {
     `Total ${totalSent.toLocaleString()} sent` +
       (overall != null ? ` · ${formatPct(overall)} bounce` : ""),
   );
-  const paused = [...(input.paused ?? [])].sort(
+  const paused = [...(input.paused ?? [])]
+    .filter((row) => !isNoiseCampaign(row.campaignName))
+    .sort(
     (a, b) =>
       a.clientName.localeCompare(b.clientName) ||
       a.campaignName.localeCompare(b.campaignName),

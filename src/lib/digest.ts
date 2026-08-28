@@ -1,4 +1,4 @@
-import { shortCampaignName } from "./names.js";
+import { isNoiseCampaign, shortCampaignName } from "./names.js";
 import type { SendingKind } from "./sending.js";
 import { bouncePercent } from "./pulse.js";
 
@@ -38,6 +38,10 @@ export function classifyTodaySends(row: {
   return { firstTouch: 0, followUp: row.sent };
 }
 
+function reportableCampaigns(campaigns: DigestCampaign[]): DigestCampaign[] {
+  return campaigns.filter((row) => !isNoiseCampaign(row.campaignName));
+}
+
 export function digestTotals(campaigns: DigestCampaign[]): {
   sent: number;
   bounced: number;
@@ -56,7 +60,7 @@ export function digestTotals(campaigns: DigestCampaign[]): {
   let waitingFollowUp = 0;
   const finishedToday: DigestCampaign[] = [];
   const paused: DigestCampaign[] = [];
-  for (const row of campaigns) {
+  for (const row of reportableCampaigns(campaigns)) {
     if (String(row.status ?? "ACTIVE").toUpperCase() === "PAUSED") {
       paused.push(row);
     }
@@ -76,7 +80,7 @@ export function digestTotals(campaigns: DigestCampaign[]): {
 
 export function rollupClients(campaigns: DigestCampaign[]): ClientDigest[] {
   const groups = new Map<string, DigestCampaign[]>();
-  for (const campaign of campaigns) {
+  for (const campaign of reportableCampaigns(campaigns)) {
     if (String(campaign.status ?? "ACTIVE").toUpperCase() === "PAUSED") continue;
     const list = groups.get(campaign.clientName) ?? [];
     list.push(campaign);
@@ -94,8 +98,9 @@ export function formatDailyDigest(
   campaigns: DigestCampaign[],
   bounceWarn = 5,
 ): string | null {
-  if (!campaigns.length) return null;
-  const totals = digestTotals(campaigns);
+  const visible = reportableCampaigns(campaigns);
+  if (!visible.length) return null;
+  const totals = digestTotals(visible);
   const lines = [
     `*${formatDayLabel(day)}*`,
     `*${totals.sent.toLocaleString()} sent today* (${totals.firstTouch.toLocaleString()} new · ${totals.followUp.toLocaleString()} follow-up)${bounceSuffix(totals.sent, totals.bounced, bounceWarn)}`,
@@ -105,7 +110,7 @@ export function formatDailyDigest(
   ];
 
   const groups = new Map<string, DigestCampaign[]>();
-  for (const campaign of campaigns) {
+  for (const campaign of visible) {
     const list = groups.get(campaign.clientName) ?? [];
     list.push(campaign);
     groups.set(campaign.clientName, list);

@@ -62,6 +62,10 @@ describe("client pulse", () => {
           clientName: "Vasco Warranty",
           campaignName: "Vasco - Signal - Warranty Admin Hiring",
         },
+        {
+          clientName: "Bolder Cyber Partners",
+          campaignName: "Canary shell: #3763797 BCP Generic (With Team)",
+        },
       ],
     });
     assert.match(text, /Thu 8\/27 10:00am — sent today/);
@@ -69,6 +73,7 @@ describe("client pulse", () => {
     assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
     assert.match(text, /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(With Team\)/);
     assert.match(text, /• \*Vasco Warranty\* — Signal - Warranty Admin Hiring/);
+    assert.doesNotMatch(text, /Canary/i);
   });
 
   it("keeps every still-paused campaign, including Generic and other clients", () => {

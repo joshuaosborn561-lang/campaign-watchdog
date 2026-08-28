@@ -291,6 +291,34 @@ describe("digest", () => {
     assert.doesNotMatch(text ?? "", /more/);
   });
 
+  it("omits canary shells from the digest", () => {
+    const text = formatDailyDigest("2026-08-27", [
+      row({
+        clientName: "Bolder Cyber Partners",
+        campaignName: "BCP Generic (With Team)",
+        status: "PAUSED",
+        remaining: 40000,
+        notStarted: 40000,
+      }),
+      row({
+        clientName: "Bolder Cyber Partners",
+        campaignName: "Canary shell: #3763797 BCP Generic (With Team)",
+        status: "PAUSED",
+        remaining: 1,
+        notStarted: 1,
+      }),
+      row({
+        clientName: "Goliath Cybersecurity",
+        campaignName: "Canary shell: #3781914 Goliath L4 Education Tickets",
+        sent: 12,
+        remaining: 4,
+      }),
+    ]);
+    assert.match(text ?? "", /Paused: \*Bolder Cyber Partners\* Generic \(With Team\)/);
+    assert.doesNotMatch(text ?? "", /Canary/i);
+    assert.doesNotMatch(text ?? "", /12 sent/);
+  });
+
   it("singles out a paused campaign", () => {
     const text = formatPauseMessage({
       clientName: "Goliath Cybersecurity",
