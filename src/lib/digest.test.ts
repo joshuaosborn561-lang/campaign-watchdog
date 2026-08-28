@@ -13,6 +13,7 @@ import {
 function row(partial: Partial<DigestCampaign> & Pick<DigestCampaign, "clientName" | "campaignName">): DigestCampaign {
   return {
     sent: 0,
+    bounced: 0,
     remaining: 0,
     notStarted: 0,
     inProgress: 0,
@@ -192,12 +193,13 @@ describe("digest", () => {
     assert.match(clients[0].line, /93 sent, all follow-up/);
   });
 
-  it("opens the daily post with totals, paused, and finished", () => {
+  it("opens the daily post with totals, campaign rows, bounce, and paused", () => {
     const text = formatDailyDigest("2026-08-27", [
       row({
         clientName: "Goliath Cybersecurity",
         campaignName: "Goliath Displacement L 501-1000 ITDir",
         sent: 80,
+        bounced: 1,
         remaining: 393,
         inProgress: 393,
         staffable: 91,
@@ -207,6 +209,7 @@ describe("digest", () => {
         clientName: "Parlay Tech",
         campaignName: "Old list",
         sent: 5,
+        bounced: 1,
         remaining: 0,
         staffable: 10,
         attached: 10,
@@ -221,10 +224,13 @@ describe("digest", () => {
       }),
     ]);
     assert.match(text ?? "", /Thu 8\/27/);
-    assert.match(text ?? "", /\*85 sent today\* \(0 new · 85 follow-up\)/);
+    assert.match(text ?? "", /\*85 sent today\* \(0 new · 85 follow-up\) · 2\.4% bounce/);
     assert.match(text ?? "", /Paused: \*Vasco Warranty\* Signal - Warranty Admin Hiring/);
     assert.match(text ?? "", /Finished today: \*Parlay Tech\* Old list/);
-    assert.match(text ?? "", /\*Goliath Cybersecurity\* — 80 sent, all follow-up/);
+    assert.match(text ?? "", /\*Goliath Cybersecurity\* — 80 sent, all follow-up · 1\.3% bounce/);
+    assert.match(text ?? "", /• Displacement L 501-1000 ITDir — 80 sent, all follow-up · 1\.3% bounce/);
+    assert.match(text ?? "", /• Signal - Warranty Admin Hiring — paused · 40 follow-ups waiting/);
+    assert.match(text ?? "", /\*Parlay Tech\* — 5 sent, all follow-up · \*20\.0% bounce\*/);
   });
 
   it("singles out a paused campaign", () => {

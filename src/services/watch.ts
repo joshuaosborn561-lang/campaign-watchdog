@@ -115,7 +115,7 @@ export class WatchService {
     if (digestPending === 0 && digestRows.length) {
       const text = formatDailyDigest(day, digestRows);
       if (text) {
-        const key = `digest:v2:${day}`;
+        const key = `digest:v3:${day}`;
         if (!(await this.alreadySent(key))) {
           await this.notify(text, {
             key,
@@ -343,11 +343,12 @@ export class WatchService {
             dailySent: row.daily_sent_count ?? 0,
           })),
         );
-        const sentToday = parseSentCount(
+        const todayVolume = parseTodayVolume(
           await this.smartlead
             .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
             .catch(() => analytics),
         );
+        const sentToday = todayVolume.sent || parseSentCount(analytics);
         const diagnosis = diagnoseSending({
           sent: sentToday,
           remaining: stats.remaining,
@@ -359,6 +360,7 @@ export class WatchService {
           clientName,
           campaignName,
           sent: sentToday,
+          bounced: todayVolume.bounced,
           remaining: stats.remaining,
           notStarted: stats.notStarted,
           inProgress: stats.inProgress,
@@ -371,7 +373,7 @@ export class WatchService {
         if (diagnosis?.shouldAlert) input.result.sending += 1;
       }
     } else if (input.status === "PAUSED" && stats) {
-      const sentToday = parseSentCount(
+      const todayVolume = parseTodayVolume(
         await this.smartlead
           .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
           .catch(() => analytics),
@@ -379,7 +381,8 @@ export class WatchService {
       input.digestRows.push({
         clientName,
         campaignName,
-        sent: sentToday,
+        sent: todayVolume.sent,
+        bounced: todayVolume.bounced,
         remaining: stats.remaining,
         notStarted: stats.notStarted,
         inProgress: stats.inProgress,

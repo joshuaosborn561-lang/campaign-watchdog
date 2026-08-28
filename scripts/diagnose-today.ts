@@ -1,6 +1,7 @@
 import { SmartleadClient } from "../src/clients/smartlead.js";
 import { classifyInboxes } from "../src/lib/inboxes.js";
 import { parseCampaignLeadStats, parseSentCount } from "../src/lib/completion.js";
+import { parseTodayVolume } from "../src/lib/pulse.js";
 import { unwrap } from "../src/lib/parse.js";
 import {
   isSendDay,
@@ -34,6 +35,7 @@ type Row = {
   name: string;
   status: string;
   sent: number;
+  bounced: number;
   remaining: number | null;
   notStarted: number | null;
   inProgress: number | null;
@@ -77,7 +79,8 @@ for (const campaign of campaigns) {
         dailySent: row.daily_sent_count ?? 0,
       })),
     );
-    const sent = parseSentCount(today);
+    const todayVolume = parseTodayVolume(today);
+    const sent = todayVolume.sent || parseSentCount(today);
     const diagnosis = diagnoseSending({
       sent,
       remaining: stats?.remaining ?? null,
@@ -92,6 +95,7 @@ for (const campaign of campaigns) {
       name: campaign.name,
       status,
       sent,
+      bounced: todayVolume.bounced,
       remaining: stats?.remaining ?? null,
       notStarted: stats?.notStarted ?? null,
       inProgress: stats?.inProgress ?? null,
@@ -109,6 +113,7 @@ for (const campaign of campaigns) {
       name: campaign.name,
       status,
       sent: -1,
+      bounced: 0,
       remaining: null,
       notStarted: null,
       inProgress: null,
@@ -173,6 +178,7 @@ const digestRows: DigestCampaign[] = rows
     clientName: r.client,
     campaignName: r.name,
     sent: r.sent,
+    bounced: r.bounced,
     remaining: r.remaining ?? 0,
     notStarted: r.notStarted ?? 0,
     inProgress: r.inProgress ?? 0,

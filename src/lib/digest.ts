@@ -1,9 +1,11 @@
 import type { SendingKind } from "./sending.js";
+import { bouncePercent } from "./pulse.js";
 
 export interface DigestCampaign {
   clientName: string;
   campaignName: string;
   sent: number;
+  bounced: number;
   remaining: number;
   notStarted: number;
   inProgress: number;
@@ -65,6 +67,7 @@ export function classifyTodaySends(row: {
 
 export function digestTotals(campaigns: DigestCampaign[]): {
   sent: number;
+  bounced: number;
   firstTouch: number;
   followUp: number;
   waitingNew: number;
@@ -73,6 +76,7 @@ export function digestTotals(campaigns: DigestCampaign[]): {
   paused: DigestCampaign[];
 } {
   let sent = 0;
+  let bounced = 0;
   let firstTouch = 0;
   let followUp = 0;
   let waitingNew = 0;
@@ -84,6 +88,7 @@ export function digestTotals(campaigns: DigestCampaign[]): {
       paused.push(row);
     }
     sent += row.sent;
+    bounced += Math.max(0, row.bounced);
     const split = classifyTodaySends(row);
     firstTouch += split.firstTouch;
     followUp += split.followUp;
@@ -93,7 +98,7 @@ export function digestTotals(campaigns: DigestCampaign[]): {
       finishedToday.push(row);
     }
   }
-  return { sent, firstTouch, followUp, waitingNew, waitingFollowUp, finishedToday, paused };
+  return { sent, bounced, firstTouch, followUp, waitingNew, waitingFollowUp, finishedToday, paused };
 }
 
 export function rollupClients(campaigns: DigestCampaign[]): ClientDigest[] {
@@ -111,27 +116,64 @@ export function rollupClients(campaigns: DigestCampaign[]): ClientDigest[] {
     .sort((a, b) => rank(a.severity) - rank(b.severity) || a.clientName.localeCompare(b.clientName));
 }
 
-export function formatDailyDigest(day: string, campaigns: DigestCampaign[]): string | null {
+export function formatDailyDigest(
+  day: string,
+  campaigns: DigestCampaign[],
+  bounceWarn = 5,
+): string | null {
   if (!campaigns.length) return null;
   const totals = digestTotals(campaigns);
-  const clients = rollupClients(campaigns);
   const lines = [
     `*${formatDayLabel(day)}*`,
-    `*${totals.sent.toLocaleString()} sent today* (${totals.firstTouch.toLocaleString()} new · ${totals.followUp.toLocaleString()} follow-up)`,
+    `*${totals.sent.toLocaleString()} sent today* (${totals.firstTouch.toLocaleString()} new · ${totals.followUp.toLocaleString()} follow-up)${bounceSuffix(totals.sent, totals.bounced, bounceWarn)}`,
     `Still waiting: ${totals.waitingNew.toLocaleString()} new · ${totals.waitingFollowUp.toLocaleString()} follow-up`,
     `Paused: ${formatNameList(totals.paused)}`,
     `Finished today: ${formatNameList(totals.finishedToday)}`,
   ];
-  const problems = clients.filter((row) => row.severity === "problem");
-  const fine = clients.filter((row) => row.severity === "fine");
-  if (problems.length) {
-    lines.push("*Watch*");
-    for (const row of problems) lines.push(row.line);
+
+  const groups = new Map<string, DigestCampaign[]>();
+  for (const campaign of campaigns) {
+    const list = groups.get(campaign.clientName) ?? [];
+    list.push(campaign);
+    groups.set(campaign.clientName, list);
   }
-  if (fine.length) {
-    lines.push("*Sent fine*");
-    for (const row of fine) lines.push(row.line);
+
+  const clients = [...groups.entries()]
+    .map(([clientName, rows]) => ({
+      clientName,
+      rows,
+      sent: rows.reduce((sum, row) => sum + row.sent, 0),
+      bounced: rows.reduce((sum, row) => sum + row.bounced, 0),
+      leftover: rows.reduce((sum, row) => sum + row.remaining, 0),
+      paused: rows.some((row) => String(row.status ?? "").toUpperCase() === "PAUSED"),
+    }))
+    .filter((client) => client.sent > 0 || client.leftover >= 10 || client.paused)
+    .sort((a, b) => b.sent - a.sent || a.clientName.localeCompare(b.clientName));
+
+  for (const client of clients) {
+    const firstTouch = client.rows.reduce((sum, row) => sum + classifyTodaySends(row).firstTouch, 0);
+    const followUp = client.rows.reduce((sum, row) => sum + classifyTodaySends(row).followUp, 0);
+    lines.push("");
+    lines.push(
+      `*${client.clientName}* — ${formatClientVolume(client.sent, firstTouch, followUp)}${bounceSuffix(client.sent, client.bounced, bounceWarn)}`,
+    );
+    const campaignsToShow = [...client.rows]
+      .filter(
+        (row) =>
+          row.sent > 0 ||
+          row.remaining >= 10 ||
+          String(row.status ?? "").toUpperCase() === "PAUSED",
+      )
+      .sort((a, b) => {
+        const pausedA = String(a.status ?? "").toUpperCase() === "PAUSED" ? 0 : 1;
+        const pausedB = String(b.status ?? "").toUpperCase() === "PAUSED" ? 0 : 1;
+        return pausedA - pausedB || b.sent - a.sent || a.campaignName.localeCompare(b.campaignName);
+      });
+    for (const row of campaignsToShow) {
+      lines.push(`• ${campaignLine(client.clientName, row, bounceWarn)}`);
+    }
   }
+
   return lines.join("\n");
 }
 
@@ -215,6 +257,41 @@ function buildClient(clientName: string, rows: DigestCampaign[]): ClientDigest {
     severity: hasProblem ? "problem" : "fine",
     line: `*${clientName}* — ${volume}${extra}.`,
   };
+}
+
+function campaignLine(clientName: string, row: DigestCampaign, bounceWarn: number): string {
+  const name = shortCampaignName(clientName, row.campaignName);
+  const paused = String(row.status ?? "").toUpperCase() === "PAUSED";
+  const split = classifyTodaySends(row);
+  const mix =
+    row.sent <= 0
+      ? "0 sent"
+      : split.firstTouch > 0 && split.followUp > 0
+        ? `${row.sent.toLocaleString()} sent (${split.firstTouch.toLocaleString()} new · ${split.followUp.toLocaleString()} follow-up)`
+        : split.firstTouch > 0
+          ? `${row.sent.toLocaleString()} sent, all new`
+          : `${row.sent.toLocaleString()} sent, all follow-up`;
+  const waiting =
+    row.sent <= 0 && row.remaining > 0
+      ? row.notStarted > 0 && row.inProgress === 0
+        ? `${row.notStarted.toLocaleString()} new waiting`
+        : row.notStarted === 0 && row.inProgress > 0
+          ? `${row.inProgress.toLocaleString()} follow-ups waiting`
+          : `${row.remaining.toLocaleString()} waiting`
+      : "";
+  const parts = [paused ? `${name} — paused` : `${name} — ${mix}`];
+  if (paused && row.sent > 0) parts.push(mix);
+  if (waiting) parts.push(waiting);
+  const bounce = bounceSuffix(row.sent, row.bounced, bounceWarn);
+  if (bounce) parts.push(bounce.replace(/^ · /, ""));
+  return parts[0] + (parts.length > 1 ? ` · ${parts.slice(1).join(" · ")}` : "");
+}
+
+function bounceSuffix(sent: number, bounced: number, bounceWarn: number): string {
+  const pct = bouncePercent(sent, bounced);
+  if (pct == null) return "";
+  const label = `${pct.toFixed(1)}% bounce`;
+  return ` · ${pct + 1e-9 >= bounceWarn ? `*${label}*` : label}`;
 }
 
 function formatClientVolume(sent: number, firstTouch: number, followUp: number): string {
