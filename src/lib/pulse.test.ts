@@ -6,6 +6,7 @@ import {
   parseTodayVolume,
   pulseSlot,
   rollupClientPulse,
+  stillPausedCampaigns,
 } from "./pulse.js";
 
 describe("client pulse", () => {
@@ -68,6 +69,29 @@ describe("client pulse", () => {
     assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
     assert.match(text, /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(With Team\)/);
     assert.match(text, /• \*Vasco Warranty\* — Signal - Warranty Admin Hiring/);
+  });
+
+  it("keeps every still-paused campaign, including Generic and other clients", () => {
+    const paused = stillPausedCampaigns([
+      { name: "BCP Generic (With Team)", status: "PAUSED" },
+      { name: "BCP Generic (No Team)", status: "PAUSED" },
+      { name: "BCP Healthcare Under-1k (With Team)", status: "ACTIVE" },
+      { name: "Goliath L1 Financial Services Tickets", status: "PAUSED" },
+      { name: "SalesGlider Nurture", status: "PAUSED" },
+      { name: "Nieto Law Firms", status: "PAUSED" },
+      { name: "Canary shell: #3763797 BCP Generic (With Team)", status: "PAUSED" },
+      { name: "Pod control shell", status: "PAUSED" },
+    ]);
+    assert.deepEqual(
+      paused.map((row) => row.name),
+      [
+        "BCP Generic (With Team)",
+        "BCP Generic (No Team)",
+        "Goliath L1 Financial Services Tickets",
+        "SalesGlider Nurture",
+        "Nieto Law Firms",
+      ],
+    );
   });
 
   it("reads today's sent and bounce from analytics-by-date", () => {

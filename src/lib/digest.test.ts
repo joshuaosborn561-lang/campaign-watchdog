@@ -233,6 +233,64 @@ describe("digest", () => {
     assert.match(text ?? "", /\*Parlay Tech\* — 5 sent, all follow-up · \*20\.0% bounce\*/);
   });
 
+  it("lists every still-paused campaign instead of truncating", () => {
+    const text = formatDailyDigest("2026-08-27", [
+      row({
+        clientName: "Bolder Cyber Partners",
+        campaignName: "BCP Generic (With Team)",
+        status: "PAUSED",
+        remaining: 40000,
+        notStarted: 40000,
+      }),
+      row({
+        clientName: "Bolder Cyber Partners",
+        campaignName: "BCP Generic (No Team)",
+        status: "PAUSED",
+        remaining: 10000,
+        notStarted: 10000,
+      }),
+      row({
+        clientName: "Goliath Cybersecurity",
+        campaignName: "Goliath L1 Financial Services Tickets",
+        status: "PAUSED",
+        remaining: 200,
+      }),
+      row({
+        clientName: "SalesGlider",
+        campaignName: "SalesGlider Nurture",
+        status: "PAUSED",
+        remaining: 50,
+      }),
+      row({
+        clientName: "Nieto",
+        campaignName: "Nieto Law Firms",
+        status: "PAUSED",
+        remaining: 80,
+      }),
+      row({
+        clientName: "Parlay Tech",
+        campaignName: "Parlay Trendrr Sales DM SEG Tickets",
+        status: "PAUSED",
+        remaining: 30,
+      }),
+      row({
+        clientName: "MSRS",
+        campaignName: "MSRS Ticket Offer Propert Manager",
+        status: "PAUSED",
+        remaining: 12,
+      }),
+    ]);
+    assert.match(text ?? "", /Paused: /);
+    assert.match(text ?? "", /Generic \(With Team\)/);
+    assert.match(text ?? "", /Generic \(No Team\)/);
+    assert.match(text ?? "", /L1 Financial Services Tickets/);
+    assert.match(text ?? "", /Nurture/);
+    assert.match(text ?? "", /Law Firms/);
+    assert.match(text ?? "", /Trendrr Sales DM SEG Tickets/);
+    assert.match(text ?? "", /Ticket Offer Propert Manager/);
+    assert.doesNotMatch(text ?? "", /more/);
+  });
+
   it("singles out a paused campaign", () => {
     const text = formatPauseMessage({
       clientName: "Goliath Cybersecurity",

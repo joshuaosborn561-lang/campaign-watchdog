@@ -36,6 +36,7 @@ import {
   parseTodayVolume,
   pulseSlot,
   rollupClientPulse,
+  stillPausedCampaigns,
   type PausedPulseRow,
 } from "../lib/pulse.js";
 import { unwrap } from "../lib/parse.js";
@@ -167,16 +168,16 @@ export class WatchService {
     ]);
     const clientsById = new Map(clients.map((client) => [client.id, client]));
     const rows: Array<{ clientName: string; sent: number; bounced: number }> = [];
-    const paused: PausedPulseRow[] = [];
+    const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns).map((campaign) => ({
+      clientName: resolveClientName(campaign, clientsById, supabaseCampaigns, registry),
+      campaignName: campaign.name,
+    }));
 
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
       const status = String(campaign.status ?? "").toUpperCase();
       if (status !== "ACTIVE" && status !== "PAUSED") continue;
       const clientName = resolveClientName(campaign, clientsById, supabaseCampaigns, registry);
-      if (status === "PAUSED") {
-        paused.push({ clientName, campaignName: campaign.name });
-      }
       try {
         const today = await this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day);
         const volume = parseTodayVolume(today);

@@ -1,5 +1,5 @@
 import { bounceRateFrom } from "./autobounce.js";
-import { shortCampaignName } from "./names.js";
+import { isNoiseCampaign, shortCampaignName } from "./names.js";
 import { hourInZone, weekdayInZone } from "./time.js";
 
 export interface ClientPulse {
@@ -11,6 +11,17 @@ export interface ClientPulse {
 export interface PausedPulseRow {
   clientName: string;
   campaignName: string;
+}
+
+/** Every still-paused real campaign, including ones left paused on purpose (e.g. Generic). */
+export function stillPausedCampaigns<T extends { name: string; status: string }>(
+  campaigns: T[],
+): T[] {
+  return campaigns.filter(
+    (campaign) =>
+      String(campaign.status ?? "").toUpperCase() === "PAUSED" &&
+      !isNoiseCampaign(campaign.name),
+  );
 }
 
 export function rollupClientPulse(

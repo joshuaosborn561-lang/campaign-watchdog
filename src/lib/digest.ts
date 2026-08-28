@@ -101,7 +101,7 @@ export function formatDailyDigest(
     `*${totals.sent.toLocaleString()} sent today* (${totals.firstTouch.toLocaleString()} new · ${totals.followUp.toLocaleString()} follow-up)${bounceSuffix(totals.sent, totals.bounced, bounceWarn)}`,
     `Still waiting: ${totals.waitingNew.toLocaleString()} new · ${totals.waitingFollowUp.toLocaleString()} follow-up`,
     `Paused: ${formatNameList(totals.paused)}`,
-    `Finished today: ${formatNameList(totals.finishedToday)}`,
+    `Finished today: ${formatNameList(totals.finishedToday, 6)}`,
   ];
 
   const groups = new Map<string, DigestCampaign[]>();
@@ -288,12 +288,14 @@ function leftoverCallout(clientName: string, row: DigestCampaign): string {
   return `${who} ${row.sent} sent, ${kind}`;
 }
 
-function formatNameList(rows: DigestCampaign[]): string {
+function formatNameList(rows: DigestCampaign[], limit?: number): string {
   if (!rows.length) return "none";
-  return rows
-    .slice(0, 6)
-    .map((row) => `*${row.clientName}* ${shortCampaignName(row.clientName, row.campaignName)}`)
-    .join("; ") + (rows.length > 6 ? ` +${rows.length - 6} more` : "");
+  const shown = limit != null ? rows.slice(0, limit) : rows;
+  return (
+    shown
+      .map((row) => `*${row.clientName}* ${shortCampaignName(row.clientName, row.campaignName)}`)
+      .join("; ") + (limit != null && rows.length > limit ? ` +${rows.length - limit} more` : "")
+  );
 }
 
 function formatDayLabel(ymd: string): string {

@@ -17,7 +17,7 @@ A cron (every 15 minutes) walks ACTIVE/PAUSED Smartlead campaigns.
 | Alert | When it fires |
 | --- | --- |
 | Completion | Lead contacted / total crosses 50, 75, 90, or ~100%. First observation is seeded with no Slack. |
-| Autobounce / pause | Campaign newly becomes `PAUSED` (15-minute watch). The 2-hour client pulse also lists every still-paused campaign by client and name. Canary shells are ignored. |
+| Autobounce / pause | Campaign newly becomes `PAUSED` (15-minute watch). The 2-hour pulse and daily digest list **every** still-paused campaign by client and name, including lists left paused on purpose (e.g. Generic). Canary shells are ignored. |
 | Sending | After that campaign's send window ends: diagnose why volume is low. Slack only if it's unstaffed, SMTP/IMAP down, or far below what leads + daily cap + 10-min gap allowed. A Parlay campaign that only had 15 scheduled does not alert. |
 | Pulse | Mon–Thu 8am–5pm ET every 2 hours: emails sent + bounce per client, plus the paused campaign list. |
 
