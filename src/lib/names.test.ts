@@ -6,6 +6,7 @@ describe("campaign names", () => {
   it("drops canary shells from Slack", () => {
     assert.equal(isNoiseCampaign("Canary shell: #3763800"), true);
     assert.equal(isNoiseCampaign("Canary BCP probe"), true);
+    assert.equal(isNoiseCampaign("Pod control shell"), true);
     assert.equal(isNoiseCampaign("BCP Healthcare Under-1k (No Team)"), false);
   });
 

@@ -5,18 +5,19 @@ import { sleep } from "../src/lib/http.js";
 const apiKey = process.env.SMARTLEAD_API_KEY?.trim();
 if (!apiKey) process.exit(1);
 const dry = process.argv.includes("--dry");
+const allClients = process.argv.includes("--all");
 const smartlead = new SmartleadClient(apiKey);
 const campaigns = await smartlead.listCampaigns();
 
 const paused = campaigns.filter(
   (campaign) => String(campaign.status ?? "").toUpperCase() === "PAUSED",
 );
-const skip = paused.filter(
-  (campaign) => isNoiseCampaign(campaign.name) || isGenericCampaign(campaign.name),
-);
-const resume = paused.filter(
-  (campaign) => !isNoiseCampaign(campaign.name) && !isGenericCampaign(campaign.name),
-);
+const resume = paused.filter((campaign) => {
+  if (isNoiseCampaign(campaign.name) || isGenericCampaign(campaign.name)) return false;
+  if (!allClients && !/^BCP\b/i.test(campaign.name)) return false;
+  return true;
+});
+const skip = paused.filter((campaign) => !resume.includes(campaign));
 
 console.log(`paused ${paused.length} · resume ${resume.length} · leave ${skip.length}`);
 for (const campaign of skip) {

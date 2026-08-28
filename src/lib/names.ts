@@ -30,7 +30,7 @@ export function shortCampaignName(clientName: string, campaignName: string): str
 
 /** Smartlead canary / probe copies. Never Slack these. */
 export function isNoiseCampaign(name: string): boolean {
-  return /canary\s*shell/i.test(name) || /^canary\b/i.test(name);
+  return /canary\s*shell/i.test(name) || /^canary\b/i.test(name) || /pod control shell/i.test(name);
 }
 
 export function isGenericCampaign(name: string): boolean {
