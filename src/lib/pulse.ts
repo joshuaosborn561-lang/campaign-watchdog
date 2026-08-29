@@ -68,8 +68,7 @@ export function isPulseWindow(
 ): boolean {
   if (!weekdays.includes(weekdayInZone(now, timeZone))) return false;
   const hour = hourInZone(now, timeZone);
-  if (!hours.length) return false;
-  return hour >= Math.min(...hours) && hour <= Math.max(...hours);
+  return hours.includes(hour);
 }
 
 export function formatClientPulse(input: {

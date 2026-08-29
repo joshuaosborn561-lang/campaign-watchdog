@@ -116,7 +116,9 @@ export class WatchService {
       await sleep(150);
     }
 
-    if (digestPending === 0 && digestRows.length) {
+    const hour = hourInZone(now, this.config.sendShortfallTimezone);
+    const wrapUp = hour >= 19;
+    if (digestRows.length && (digestPending === 0 || wrapUp)) {
       const text = formatDailyDigest(day, digestRows);
       if (text) {
         const key = `digest:v3:${day}`;
@@ -149,6 +151,9 @@ export class WatchService {
 
     const day = ymdInZone(now, timeZone);
     const hour = hourInZone(now, timeZone);
+    if (hour >= this.config.sendShortfallAfterHour) {
+      return { posted: false, clients: 0, paused: 0 };
+    }
     const slot = pulseSlot(day, hour);
     const key = `pulse:v2:${slot}`;
     if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
@@ -276,6 +281,9 @@ export class WatchService {
           }
           snapshot.notifiedThresholds.push(threshold);
           if (threshold < 100) continue;
+          if (hourInZone(input.now, this.config.sendShortfallTimezone) >= this.config.sendShortfallAfterHour) {
+            continue;
+          }
           await this.notify(
             formatFinishedMessage({ clientName, campaignName }),
             {

@@ -106,20 +106,30 @@ describe("client pulse", () => {
     );
   });
 
-  it("only fires 8am–5pm ET Monday–Thursday", () => {
-    const hours = [8, 10, 12, 14, 16, 17];
+  it("only fires 8am–4pm ET Monday–Thursday, not the 5pm wrap-up hour", () => {
+    const hours = [8, 10, 12, 14, 16];
     const days = [1, 2, 3, 4];
     // Thu 8/27 2:00pm ET
     assert.equal(
       isPulseWindow(new Date("2026-08-27T18:00:00.000Z"), "America/New_York", hours, days),
       true,
     );
-    // Thu 8/27 5:00pm ET
+    // Thu 8/27 4:00pm ET — last pulse
     assert.equal(
-      isPulseWindow(new Date("2026-08-27T21:00:00.000Z"), "America/New_York", hours, days),
+      isPulseWindow(new Date("2026-08-27T20:00:00.000Z"), "America/New_York", hours, days),
       true,
     );
-    // Thu 8/27 6:00pm ET — after 5
+    // Thu 8/27 5:00pm ET — digest hour, no pulse
+    assert.equal(
+      isPulseWindow(new Date("2026-08-27T21:00:00.000Z"), "America/New_York", hours, days),
+      false,
+    );
+    // Thu 8/27 3:00pm ET — not a scheduled slot
+    assert.equal(
+      isPulseWindow(new Date("2026-08-27T19:00:00.000Z"), "America/New_York", hours, days),
+      false,
+    );
+    // Thu 8/27 6:00pm ET
     assert.equal(
       isPulseWindow(new Date("2026-08-27T22:00:00.000Z"), "America/New_York", hours, days),
       false,
