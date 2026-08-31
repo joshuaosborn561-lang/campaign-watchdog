@@ -85,6 +85,54 @@ export function newThresholds(
   return reached.filter((threshold) => !seen.has(threshold));
 }
 
+/** 50% is tracked in state but never Slacked — too early for a refill. */
+export const SLACK_COMPLETION_THRESHOLDS = [75, 90, 100] as const;
+
+/**
+ * Thresholds to Slack on this pass. Never 50%. Never 75/90 if the
+ * campaign is already finished (100%) on the same observation.
+ */
+export function completionAlertsToPost(fresh: number[], percent: number): number[] {
+  const finished = percent >= 99.5 || fresh.includes(100);
+  return fresh.filter((threshold) => {
+    if (threshold !== 75 && threshold !== 90 && threshold !== 100) return false;
+    if (threshold < 100 && finished) return false;
+    return true;
+  });
+}
+
+export interface ClientCampaignLeadRow {
+  id: number;
+  clientId?: number | null;
+  clientName: string;
+  campaignName: string;
+  status: string;
+  remaining: number | null;
+}
+
+/**
+ * True if this client still has another ACTIVE, non-noise, non-Generic
+ * campaign that can send. Unknown remaining is treated as still sending
+ * so we do not cry refill while a sibling scan failed.
+ */
+export function clientHasOtherActiveLeads(
+  finishing: { id: number; clientId?: number | null; clientName: string },
+  rows: ClientCampaignLeadRow[],
+  isIgnored: (campaignName: string) => boolean,
+): boolean {
+  return rows.some((row) => {
+    if (row.id === finishing.id) return false;
+    if (String(row.status ?? "").toUpperCase() !== "ACTIVE") return false;
+    if (isIgnored(row.campaignName)) return false;
+    const sameClient =
+      finishing.clientId != null && row.clientId != null
+        ? finishing.clientId === row.clientId
+        : row.clientName === finishing.clientName;
+    if (!sameClient) return false;
+    return row.remaining == null || row.remaining > 0;
+  });
+}
+
 export function parseSentCount(raw: unknown): number {
   if (typeof raw === "number") return asNumber(raw) ?? 0;
   if (Array.isArray(raw)) {

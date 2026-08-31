@@ -4,6 +4,7 @@ import {
   classifyTodaySends,
   formatDailyDigest,
   formatFinishedMessage,
+  formatNearlyDoneMessage,
   formatPauseMessage,
   rollupClients,
   shortCampaignName,
@@ -334,8 +335,55 @@ describe("digest", () => {
       formatFinishedMessage({
         clientName: "Vasco Warranty",
         campaignName: "Vasco - Signal - Warranty Admin Hiring",
+        otherActiveLeads: false,
       }),
       /finished the list/,
+    );
+  });
+
+  it("asks for a refill when a campaign is nearly done", () => {
+    const at75 = formatNearlyDoneMessage({
+      clientName: "Vasco Warranty",
+      campaignName: "Vasco - Signal - Warranty Admin Hiring",
+      threshold: 75,
+      remaining: 238,
+    });
+    const at90 = formatNearlyDoneMessage({
+      clientName: "Goliath Cybersecurity",
+      campaignName: "Goliath Displacement L 501-1000 ITDir",
+      threshold: 90,
+      remaining: 40,
+    });
+    assert.equal(
+      at75,
+      "*Vasco Warranty* — *Vasco - Signal - Warranty Admin Hiring* is nearly done (75%, 238 left). Refill soon.",
+    );
+    assert.equal(
+      at90,
+      "*Goliath Cybersecurity* — *Goliath Displacement L 501-1000 ITDir* is nearly done (90%, 40 left). Refill soon.",
+    );
+    assert.doesNotMatch(at75, /100\.0% through the list/);
+    assert.doesNotMatch(at75, /50% completion/);
+  });
+
+  it("says whether the finished client still has anything sending", () => {
+    const stillSending = formatFinishedMessage({
+      clientName: "Vasco Warranty",
+      campaignName: "Vasco - Signal - Warranty Admin Hiring",
+      otherActiveLeads: true,
+    });
+    const dark = formatFinishedMessage({
+      clientName: "Vasco Warranty",
+      campaignName: "Vasco - Signal - Warranty Admin Hiring",
+      otherActiveLeads: false,
+    });
+    assert.equal(
+      stillSending,
+      "*Vasco Warranty* — *Vasco - Signal - Warranty Admin Hiring* finished the list. This client still has other active campaigns with leads left.",
+    );
+    assert.equal(
+      dark,
+      "*Vasco Warranty* — *Vasco - Signal - Warranty Admin Hiring* finished the list. This client now has nothing sending — flag for a lead refill.",
     );
   });
 });

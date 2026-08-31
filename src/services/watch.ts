@@ -10,16 +10,20 @@ import type { SlackClient } from "../clients/slack.js";
 import type { CampaignNameRow, SupabaseStore } from "../clients/supabase.js";
 import { detectAutobounce } from "../lib/autobounce.js";
 import {
+  clientHasOtherActiveLeads,
+  completionAlertsToPost,
   completionPercent,
   newThresholds,
   parseCampaignLeadStats,
   parseSentCount,
   thresholdsReached,
+  type ClientCampaignLeadRow,
 } from "../lib/completion.js";
 import { classifyInboxes } from "../lib/inboxes.js";
 import {
   formatDailyDigest,
   formatFinishedMessage,
+  formatNearlyDoneMessage,
   formatPauseMessage,
   type DigestCampaign,
 } from "../lib/digest.js";
@@ -29,7 +33,7 @@ import {
   windowHasEnded,
 } from "../lib/schedule.js";
 import { diagnoseSending } from "../lib/sending.js";
-import { isNoiseCampaign } from "../lib/names.js";
+import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
 import {
   formatClientPulse,
   isPulseWindow,
@@ -50,6 +54,18 @@ export interface WatchResult {
   sending: number;
   digest: number;
   errors: string[];
+}
+
+interface PendingCompletion {
+  campaignId: number;
+  clientId: number | null;
+  clientName: string;
+  campaignName: string;
+  threshold: number;
+  percent: number;
+  remaining: number;
+  contacted: number;
+  total: number;
 }
 
 export class WatchService {
@@ -87,6 +103,8 @@ export class WatchService {
     const clientsById = new Map(clients.map((client) => [client.id, client]));
     const watch = new Set(this.config.watchStatuses);
     const day = ymdInZone(now, this.config.sendShortfallTimezone);
+    const inventory: ClientCampaignLeadRow[] = [];
+    const pendingCompletion: PendingCompletion[] = [];
 
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
@@ -105,6 +123,8 @@ export class WatchService {
           now,
           result,
           digestRows,
+          inventory,
+          pendingCompletion,
           onPendingDigest: () => {
             digestPending += 1;
           },
@@ -115,6 +135,8 @@ export class WatchService {
       }
       await sleep(150);
     }
+
+    await this.flushCompletionAlerts(pendingCompletion, inventory, now, result);
 
     const hour = hourInZone(now, this.config.sendShortfallTimezone);
     const wrapUp = hour >= 19;
@@ -235,6 +257,8 @@ export class WatchService {
     now: Date;
     result: WatchResult;
     digestRows: DigestCampaign[];
+    inventory: ClientCampaignLeadRow[];
+    pendingCompletion: PendingCompletion[];
     onPendingDigest: () => void;
   }): Promise<void> {
     const snapshot = this.state.snapshot(input.campaign.id);
@@ -246,6 +270,15 @@ export class WatchService {
       input.registry,
     );
     const campaignName = input.campaign.name;
+    const inventoryRow: ClientCampaignLeadRow = {
+      id: input.campaign.id,
+      clientId: input.campaign.client_id ?? null,
+      clientName,
+      campaignName,
+      status: input.status,
+      remaining: null,
+    };
+    input.inventory.push(inventoryRow);
 
     const [detail, settings, analytics, statistics] = await Promise.all([
       this.smartlead.getCampaign(input.campaign.id).catch(() => input.campaign),
@@ -262,6 +295,7 @@ export class WatchService {
     if (stats) {
       const percent = completionPercent(stats);
       snapshot.lastCompletionPct = percent;
+      inventoryRow.remaining = stats.remaining;
       if (firstSeen) {
         snapshot.notifiedThresholds = thresholdsReached(
           percent,
@@ -274,28 +308,22 @@ export class WatchService {
           this.config.completionThresholds,
         );
         for (const threshold of fresh) {
-          const key = `completion:v1:${input.campaign.id}:${threshold}`;
-          if (await this.alreadySent(key)) {
-            snapshot.notifiedThresholds.push(threshold);
-            continue;
-          }
           snapshot.notifiedThresholds.push(threshold);
-          if (threshold < 100) continue;
-          if (hourInZone(input.now, this.config.sendShortfallTimezone) >= this.config.sendShortfallAfterHour) {
-            continue;
-          }
-          await this.notify(
-            formatFinishedMessage({ clientName, campaignName }),
-            {
-              key,
+        }
+        if (!isCompletionIgnoredCampaign(campaignName)) {
+          for (const threshold of completionAlertsToPost(fresh, percent)) {
+            input.pendingCompletion.push({
               campaignId: input.campaign.id,
+              clientId: input.campaign.client_id ?? null,
               clientName,
               campaignName,
-              kind: "completion",
-              payload: { threshold, percent, ...stats },
-            },
-          );
-          input.result.completion += 1;
+              threshold,
+              percent,
+              remaining: stats.remaining,
+              contacted: stats.contacted,
+              total: stats.total,
+            });
+          }
         }
       }
     }
@@ -416,6 +444,58 @@ export class WatchService {
     snapshot.status = input.status;
     snapshot.seen = true;
     this.state.put(input.campaign.id, snapshot);
+  }
+
+  private async flushCompletionAlerts(
+    pending: PendingCompletion[],
+    inventory: ClientCampaignLeadRow[],
+    now: Date,
+    result: WatchResult,
+  ): Promise<void> {
+    const afterHours =
+      hourInZone(now, this.config.sendShortfallTimezone) >= this.config.sendShortfallAfterHour;
+    if (afterHours) return;
+
+    for (const item of pending) {
+      const key = `completion:v1:${item.campaignId}:${item.threshold}`;
+      if (await this.alreadySent(key)) continue;
+      const text =
+        item.threshold >= 100
+          ? formatFinishedMessage({
+              clientName: item.clientName,
+              campaignName: item.campaignName,
+              otherActiveLeads: clientHasOtherActiveLeads(
+                {
+                  id: item.campaignId,
+                  clientId: item.clientId,
+                  clientName: item.clientName,
+                },
+                inventory,
+                isCompletionIgnoredCampaign,
+              ),
+            })
+          : formatNearlyDoneMessage({
+              clientName: item.clientName,
+              campaignName: item.campaignName,
+              threshold: item.threshold,
+              remaining: item.remaining,
+            });
+      await this.notify(text, {
+        key,
+        campaignId: item.campaignId,
+        clientName: item.clientName,
+        campaignName: item.campaignName,
+        kind: "completion",
+        payload: {
+          threshold: item.threshold,
+          percent: item.percent,
+          remaining: item.remaining,
+          contacted: item.contacted,
+          total: item.total,
+        },
+      });
+      result.completion += 1;
+    }
   }
 
   private async alreadySent(key: string): Promise<boolean> {

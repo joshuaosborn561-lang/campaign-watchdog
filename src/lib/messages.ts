@@ -13,15 +13,17 @@ export function formatCompletionMessage(input: {
   contacted: number;
   total: number;
   remaining: number;
+  otherActiveLeads?: boolean;
 }): string {
-  const done = input.threshold >= 100;
-  const headline = done
-    ? `${formatClientCampaign(input.clientName, input.campaignName)} is at 100% completion.`
-    : `${formatClientCampaign(input.clientName, input.campaignName)} is at ${input.threshold}% completion.`;
-  const detail = done
-    ? `${input.contacted.toLocaleString()} / ${input.total.toLocaleString()} leads contacted.`
-    : `${input.percent.toFixed(1)}% through the list (${input.contacted.toLocaleString()} / ${input.total.toLocaleString()} contacted, ${input.remaining.toLocaleString()} left).`;
-  return [headline, detail].join(" ");
+  const who = formatClientCampaign(input.clientName, input.campaignName);
+  if (input.threshold >= 100) {
+    const done = `${who} finished the list.`;
+    if (input.otherActiveLeads) {
+      return `${done} This client still has other active campaigns with leads left.`;
+    }
+    return `${done} This client now has nothing sending — flag for a lead refill.`;
+  }
+  return `${who} is nearly done (${input.threshold}%, ${input.remaining.toLocaleString()} left). Refill soon.`;
 }
 
 export function formatAutobounceMessage(input: {

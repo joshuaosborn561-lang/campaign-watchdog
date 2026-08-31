@@ -19,7 +19,23 @@ describe("messages", () => {
     });
     assert.match(text, /\*Vasco Warranty\*/);
     assert.match(text, /\*Vasco - Signal - Warranty Admin Hiring\*/);
-    assert.match(text, /75% completion/);
+    assert.match(text, /nearly done \(75%, 238 left\)/);
+    assert.match(text, /Refill soon/);
+    assert.doesNotMatch(text, /76\.2% through the list/);
+  });
+
+  it("flags a finished client with nothing else sending", () => {
+    const text = formatCompletionMessage({
+      clientName: "Vasco Warranty",
+      campaignName: "Vasco - Signal - Warranty Admin Hiring",
+      threshold: 100,
+      percent: 100,
+      contacted: 1000,
+      total: 1000,
+      remaining: 0,
+    });
+    assert.match(text, /finished the list/);
+    assert.match(text, /this client now has nothing sending — flag for a lead refill/i);
   });
 
   it("names the client and campaign on autobounce", () => {
