@@ -175,11 +175,27 @@ export function formatPauseMessage(input: {
   return `${who} paused.`;
 }
 
+export function formatNearlyDoneMessage(input: {
+  clientName: string;
+  campaignName: string;
+  threshold: number;
+  remaining: number;
+}): string {
+  const who = `*${input.clientName}* — *${input.campaignName}*`;
+  const left = `${input.remaining.toLocaleString()} left`;
+  return `${who} is nearly done (${input.threshold}%, ${left}). Refill soon.`;
+}
+
 export function formatFinishedMessage(input: {
   clientName: string;
   campaignName: string;
+  otherActiveLeads: boolean;
 }): string {
-  return `*${input.clientName}* — *${input.campaignName}* finished the list.`;
+  const who = `*${input.clientName}* — *${input.campaignName}* finished the list.`;
+  if (input.otherActiveLeads) {
+    return `${who} This client still has other active campaigns with leads left.`;
+  }
+  return `${who} This client now has nothing sending — flag for a lead refill.`;
 }
 
 function buildClient(clientName: string, rows: DigestCampaign[]): ClientDigest {

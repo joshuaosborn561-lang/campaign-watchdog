@@ -33,10 +33,24 @@ export function isCanaryShell(name: string): boolean {
   return /canary[\s_-]*shell/i.test(name) || /^canary\b/i.test(name);
 }
 
+/** Word-hunt control copies. Same treatment as canary shells. */
+export function isWordHuntShell(name: string): boolean {
+  return /word[\s_-]*hunt[\s_-]*shell/i.test(name) || /^word[\s_-]*hunt\b/i.test(name);
+}
+
 export function isNoiseCampaign(name: string): boolean {
-  return isCanaryShell(name) || /pod control[\s_-]*shell/i.test(name);
+  return (
+    isCanaryShell(name) ||
+    isWordHuntShell(name) ||
+    /pod control[\s_-]*shell/i.test(name)
+  );
 }
 
 export function isGenericCampaign(name: string): boolean {
   return /\bgeneric\b/i.test(name);
+}
+
+/** Completion / refill Slack ignores shells and Generic pools. */
+export function isCompletionIgnoredCampaign(name: string): boolean {
+  return isNoiseCampaign(name) || isGenericCampaign(name);
 }
