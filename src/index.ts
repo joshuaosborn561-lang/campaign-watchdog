@@ -31,6 +31,16 @@ async function main(): Promise<void> {
   const watch = new WatchService(config, smartlead, slack, state, supabase);
 
   let running = false;
+  let pulseQueued: string | null = null;
+
+  const drainPulse = () => {
+    running = false;
+    if (!pulseQueued) return;
+    const reason = pulseQueued;
+    pulseQueued = null;
+    void runPulse(reason);
+  };
+
   const runOnce = async (reason: string) => {
     if (running) {
       console.log(`[watchdog] skip ${reason}: already running`);
@@ -61,7 +71,7 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error("[watchdog] run failed", error);
     } finally {
-      running = false;
+      drainPulse();
     }
   };
 
@@ -80,7 +90,8 @@ async function main(): Promise<void> {
 
   const runPulse = async (reason: string) => {
     if (running) {
-      console.log(`[watchdog] skip ${reason}: already running`);
+      pulseQueued = reason;
+      console.log(`[watchdog] queue ${reason}: watch busy`);
       return;
     }
     running = true;
@@ -92,7 +103,7 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error("[watchdog] pulse failed", error);
     } finally {
-      running = false;
+      drainPulse();
     }
   };
 

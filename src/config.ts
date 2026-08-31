@@ -99,7 +99,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       bounceAutoPauseThreshold: optionalNumber("BOUNCE_AUTO_PAUSE_THRESHOLD", 5),
       minBounceSample: optionalNumber("MIN_BOUNCE_SAMPLE", 20),
       cron: optional("CRON", "*/15 * * * *"),
-      pulseCron: optional("PULSE_CRON", "0 8,10,12,14,16 * * 1-4"),
+      pulseCron: optional("PULSE_CRON", "5 8,10,12,14,16 * * 1-4"),
       pulseHours: csvNumbers("PULSE_HOURS", [8, 10, 12, 14, 16]),
       pulseWeekdays: csvNumbers("PULSE_WEEKDAYS", [1, 2, 3, 4]),
       watchStatuses: csvStrings("WATCH_STATUSES", ["ACTIVE", "PAUSED"]),

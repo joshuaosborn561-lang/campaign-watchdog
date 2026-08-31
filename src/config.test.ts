@@ -11,7 +11,7 @@ describe("loadConfig", () => {
     assert.equal(config.slackChannelId, "C0BT978GSAC");
     assert.deepEqual(config.completionThresholds, [50, 75, 90, 100]);
     assert.equal(config.messagePerDay, 30);
-    assert.equal(config.pulseCron, "0 8,10,12,14,16 * * 1-4");
+    assert.equal(config.pulseCron, "5 8,10,12,14,16 * * 1-4");
     assert.deepEqual(config.pulseHours, [8, 10, 12, 14, 16]);
     assert.deepEqual(config.pulseWeekdays, [1, 2, 3, 4]);
   });
