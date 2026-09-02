@@ -80,11 +80,45 @@ function fakeSupabase(options?: {
   };
 }
 
+function fakeHeyReach(options: {
+  workspace: { id: string; clientName: string };
+  campaigns: Array<{
+    id: number;
+    name: string;
+    status?: string;
+    pending: number;
+    inProgress: number;
+    total?: number;
+  }>;
+  byDayStats?: Record<number, unknown>;
+}) {
+  return {
+    workspace: { ...options.workspace, apiKey: "test" },
+    listCampaigns: async () =>
+      options.campaigns.map((row) => ({
+        id: row.id,
+        name: row.name,
+        status: row.status ?? "IN_PROGRESS",
+        progressStats: {
+          total: row.total ?? row.pending + row.inProgress,
+          pending: row.pending,
+          inProgress: row.inProgress,
+          finished: 0,
+          failed: 0,
+        },
+      })),
+    getCampaign: async () => null,
+    getOverallStats: async (input: { campaignId: number }) =>
+      options.byDayStats?.[input.campaignId] ?? { byDayStats: {} },
+  };
+}
+
 async function withService(
   smartlead: ReturnType<typeof fakeSmartlead>,
   slack: ReturnType<typeof fakeSlack>,
   supabase: ReturnType<typeof fakeSupabase>,
   run: (watch: WatchService, state: StateStore) => Promise<void>,
+  heyreach: ReturnType<typeof fakeHeyReach>[] = [],
 ): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "watchdog-"));
   const state = new StateStore(path.join(dir, "state.json"));
@@ -99,6 +133,7 @@ async function withService(
     slack as never,
     state,
     supabase as never,
+    heyreach as never,
   );
   try {
     await run(watch, state);
@@ -333,6 +368,136 @@ describe("WatchService attribution and flags", () => {
           "*Vasco Warranty* — *Vasco - Service - Standard Brands* finished the list. This client now has nothing sending — flag for a lead refill.",
         );
       },
+    );
+  });
+});
+
+const weekdayPace = {
+  byDayStats: {
+    "2026-08-24": { connectionsSent: 2, messagesSent: 1 },
+    "2026-08-25": { connectionsSent: 2, messagesSent: 2 },
+    "2026-08-26": { connectionsSent: 1, messagesSent: 2 },
+    "2026-08-27": { connectionsSent: 2, messagesSent: 1 },
+    "2026-08-28": { connectionsSent: 3, messagesSent: 2 },
+  },
+};
+
+describe("WatchService HeyReach runway", () => {
+  it("seeds first seen under-7/dry without Slack, then pages client + campaign", async () => {
+    const slack = fakeSlack();
+    const heyreach = fakeHeyReach({
+      workspace: { id: "techevo", clientName: "TechEvolution" },
+      campaigns: [
+        { id: 566902, name: "TechEvo NE IT DM v2", pending: 0, inProgress: 21, total: 45 },
+      ],
+      byDayStats: { 566902: weekdayPace },
+    });
+    await withService(
+      fakeSmartlead({ campaigns: [] }),
+      slack,
+      fakeSupabase(),
+      async (watch, state) => {
+        const now = new Date("2026-09-01T16:10:00.000Z");
+        const first = await watch.run(now);
+        assert.equal(first.heyreach, 0);
+        assert.equal(slack.posted.length, 0);
+        assert.equal(state.heyreachSnapshot("techevo", 566902).seen, true);
+        assert.equal(state.heyreachSnapshot("techevo", 566902).notifiedUnder7, true);
+
+        state.putHeyreach("techevo", 566902, {
+          status: "IN_PROGRESS",
+          seen: true,
+          notifiedUnder7: false,
+          notifiedPendingDry: false,
+        });
+        const second = await watch.run(now);
+        assert.equal(second.heyreach, 1);
+        assert.equal(
+          slack.posted[0],
+          "*TechEvolution* — *TechEvo NE IT DM v2* is nearly done (~5.8d LinkedIn runway, 21 left, 0 pending). Refill soon.",
+        );
+      },
+      [heyreach],
+    );
+  });
+
+  it("does not Slack Call Followups 530529 even when pending-dry", async () => {
+    const slack = fakeSlack();
+    const heyreach = fakeHeyReach({
+      workspace: { id: "salesglider", clientName: "SalesGlider" },
+      campaigns: [
+        { id: 530529, name: "Call Followups", pending: 0, inProgress: 7, total: 13 },
+        { id: 557698, name: "Staffing Owners v2", pending: 305, inProgress: 122, total: 522 },
+      ],
+      byDayStats: {
+        530529: weekdayPace,
+        557698: {
+          byDayStats: {
+            "2026-08-24": { connectionsSent: 20, messagesSent: 2 },
+            "2026-08-25": { connectionsSent: 20, messagesSent: 2 },
+            "2026-08-26": { connectionsSent: 20, messagesSent: 2 },
+            "2026-08-27": { connectionsSent: 20, messagesSent: 2 },
+            "2026-08-28": { connectionsSent: 20, messagesSent: 2 },
+          },
+        },
+      },
+    });
+    await withService(
+      fakeSmartlead({ campaigns: [] }),
+      slack,
+      fakeSupabase(),
+      async (watch, state) => {
+        const now = new Date("2026-09-01T16:10:00.000Z");
+        await watch.run(now);
+        state.putHeyreach("salesglider", 530529, {
+          status: "IN_PROGRESS",
+          seen: true,
+          notifiedUnder7: false,
+          notifiedPendingDry: false,
+        });
+        state.putHeyreach("salesglider", 557698, {
+          status: "IN_PROGRESS",
+          seen: true,
+          notifiedUnder7: false,
+          notifiedPendingDry: false,
+        });
+        const result = await watch.run(now);
+        assert.equal(result.heyreach, 0);
+        assert.equal(slack.posted.length, 0);
+      },
+      [heyreach],
+    );
+  });
+
+  it("skips Slack when supabase already has the under-7 key", async () => {
+    const slack = fakeSlack();
+    const heyreach = fakeHeyReach({
+      workspace: { id: "techevo", clientName: "TechEvolution" },
+      campaigns: [
+        { id: 566902, name: "TechEvo NE IT DM v2", pending: 0, inProgress: 21, total: 45 },
+      ],
+      byDayStats: { 566902: weekdayPace },
+    });
+    const sent = new Set(["heyreach:under7:v1:566902", "heyreach:pending-dry:v1:566902"]);
+    await withService(
+      fakeSmartlead({ campaigns: [] }),
+      slack,
+      {
+        ...fakeSupabase(),
+        hasAlert: async (key: string) => sent.has(key),
+      },
+      async (watch, state) => {
+        state.putHeyreach("techevo", 566902, {
+          status: "IN_PROGRESS",
+          seen: true,
+          notifiedUnder7: false,
+          notifiedPendingDry: false,
+        });
+        const result = await watch.run(new Date("2026-09-01T16:10:00.000Z"));
+        assert.equal(result.heyreach, 0);
+        assert.equal(slack.posted.length, 0);
+      },
+      [heyreach],
     );
   });
 });

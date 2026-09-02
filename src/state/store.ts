@@ -10,8 +10,19 @@ export interface CampaignSnapshot {
   seen: boolean;
 }
 
+export interface HeyReachSnapshot {
+  status: string;
+  seen: boolean;
+  lastRunwayDays?: number | null;
+  lastPending?: number;
+  lastRemaining?: number;
+  notifiedUnder7?: boolean;
+  notifiedPendingDry?: boolean;
+}
+
 export interface WatchdogState {
   campaigns: Record<string, CampaignSnapshot>;
+  heyreachCampaigns?: Record<string, HeyReachSnapshot>;
   lastDigestDay?: string;
   lastPulseSlot?: string;
   slack?: {
@@ -33,6 +44,7 @@ export class StateStore {
       const parsed = JSON.parse(raw) as WatchdogState;
       this.state = {
         campaigns: parsed.campaigns ?? {},
+        heyreachCampaigns: parsed.heyreachCampaigns ?? {},
         lastDigestDay: parsed.lastDigestDay,
         lastPulseSlot: parsed.lastPulseSlot,
         slack: parsed.slack,
@@ -62,6 +74,25 @@ export class StateStore {
 
   put(campaignId: number, snapshot: CampaignSnapshot): void {
     this.state.campaigns[String(campaignId)] = snapshot;
+  }
+
+  heyreachKey(workspaceId: string, campaignId: number): string {
+    return `${workspaceId}:${campaignId}`;
+  }
+
+  heyreachSnapshot(workspaceId: string, campaignId: number): HeyReachSnapshot {
+    const key = this.heyreachKey(workspaceId, campaignId);
+    const store = (this.state.heyreachCampaigns ??= {});
+    const existing = store[key];
+    if (existing) return existing;
+    const created: HeyReachSnapshot = { status: "", seen: false };
+    store[key] = created;
+    return created;
+  }
+
+  putHeyreach(workspaceId: string, campaignId: number, snapshot: HeyReachSnapshot): void {
+    const store = (this.state.heyreachCampaigns ??= {});
+    store[this.heyreachKey(workspaceId, campaignId)] = snapshot;
   }
 
   slackTokens(): { access_token?: string; refresh_token?: string } | undefined {

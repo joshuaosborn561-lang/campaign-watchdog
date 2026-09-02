@@ -41,6 +41,97 @@ function csvStrings(name: string, fallback: string[]): string[] {
     .filter(Boolean);
 }
 
+export interface HeyReachWorkspaceConfig {
+  id: string;
+  clientName: string;
+  apiKey: string;
+}
+
+const HEYREACH_CLIENT_NAMES: Record<string, string> = {
+  salesglider: "SalesGlider",
+  techevo: "TechEvolution",
+};
+
+/** Workspace keys from Railway env. Never reads vault. Skips MASTER / org keys. */
+export function heyreachWorkspacesFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): HeyReachWorkspaceConfig[] {
+  const byId = new Map<string, HeyReachWorkspaceConfig>();
+
+  const json = env.HEYREACH_WORKSPACES?.trim();
+  if (json) {
+    try {
+      const parsed = JSON.parse(json) as unknown;
+      for (const workspace of normalizeWorkspaceJson(parsed)) {
+        if (isMasterWorkspace(workspace.id)) continue;
+        byId.set(workspace.id, workspace);
+      }
+    } catch {
+      throw new Error("HEYREACH_WORKSPACES must be JSON object or array");
+    }
+  }
+
+  for (const [name, value] of Object.entries(env)) {
+    const match = /^HEYREACH_(.+)_API_KEY$/.exec(name);
+    if (!match || !value?.trim()) continue;
+    const slug = match[1].toLowerCase().replace(/_/g, "");
+    if (isMasterWorkspace(slug) || slug === "workspaces") continue;
+    const id = match[1].toLowerCase().replace(/_/g, "-");
+    byId.set(id, {
+      id,
+      clientName: HEYREACH_CLIENT_NAMES[slug] ?? titleCaseSlug(match[1]),
+      apiKey: value.trim(),
+    });
+  }
+
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function isMasterWorkspace(id: string): boolean {
+  return /master/i.test(id);
+}
+
+function titleCaseSlug(slug: string): string {
+  return slug
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function normalizeWorkspaceJson(parsed: unknown): HeyReachWorkspaceConfig[] {
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const record = row as Record<string, unknown>;
+      const apiKey = String(record.apiKey ?? record.api_key ?? "").trim();
+      const rawId = String(record.id ?? record.clientName ?? record.name ?? "").trim();
+      if (!apiKey || !rawId) return [];
+      const id = rawId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const clientName =
+        String(record.clientName ?? record.client_name ?? record.name ?? "").trim() ||
+        HEYREACH_CLIENT_NAMES[id.replace(/-/g, "")] ||
+        titleCaseSlug(rawId);
+      return [{ id, clientName, apiKey }];
+    });
+  }
+  if (parsed && typeof parsed === "object") {
+    return Object.entries(parsed as Record<string, unknown>).flatMap(([name, value]) => {
+      const apiKey = typeof value === "string" ? value.trim() : "";
+      if (!apiKey || !name.trim()) return [];
+      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      return [
+        {
+          id,
+          clientName: HEYREACH_CLIENT_NAMES[id.replace(/-/g, "")] || name.trim(),
+          apiKey,
+        },
+      ];
+    });
+  }
+  return [];
+}
+
 export interface AppConfig {
   smartleadApiKey: string;
   slackBotToken: string;
@@ -68,6 +159,11 @@ export interface AppConfig {
   host: string;
   runToken: string;
   stateFilePath: string;
+  heyreachWorkspaces: HeyReachWorkspaceConfig[];
+  heyreachExcludeIds: number[];
+  heyreachRunwayDays: number;
+  heyreachPaceLookbackDays: number;
+  heyreachWeekdays: number[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -108,6 +204,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       host: optional("HOST", "0.0.0.0"),
       runToken: optional("RUN_TOKEN"),
       stateFilePath: optional("STATE_FILE_PATH", "/data/watchdog-state.json"),
+      heyreachWorkspaces: heyreachWorkspacesFromEnv(env),
+      heyreachExcludeIds: csvNumbers("HEYREACH_ALERT_EXCLUDE_IDS", [530529]),
+      heyreachRunwayDays: optionalNumber("HEYREACH_RUNWAY_DAYS", 7),
+      heyreachPaceLookbackDays: optionalNumber("HEYREACH_PACE_LOOKBACK_DAYS", 14),
+      heyreachWeekdays: csvNumbers("HEYREACH_WEEKDAYS", [1, 2, 3, 4, 5]),
     };
   } finally {
     process.env = previous;
