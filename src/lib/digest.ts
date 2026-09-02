@@ -1,3 +1,4 @@
+import { clientGroupKey } from "./clients.js";
 import { isNoiseCampaign, shortCampaignName } from "./names.js";
 import type { SendingKind } from "./sending.js";
 import { bouncePercent } from "./pulse.js";
@@ -5,6 +6,7 @@ import { bouncePercent } from "./pulse.js";
 export { shortCampaignName };
 
 export interface DigestCampaign {
+  clientId?: number | null;
   clientName: string;
   campaignName: string;
   sent: number;
@@ -82,13 +84,14 @@ export function rollupClients(campaigns: DigestCampaign[]): ClientDigest[] {
   const groups = new Map<string, DigestCampaign[]>();
   for (const campaign of reportableCampaigns(campaigns)) {
     if (String(campaign.status ?? "ACTIVE").toUpperCase() === "PAUSED") continue;
-    const list = groups.get(campaign.clientName) ?? [];
+    const key = clientGroupKey(campaign);
+    const list = groups.get(key) ?? [];
     list.push(campaign);
-    groups.set(campaign.clientName, list);
+    groups.set(key, list);
   }
 
-  return [...groups.entries()]
-    .map(([clientName, rows]) => buildClient(clientName, rows))
+  return [...groups.values()]
+    .map((rows) => buildClient(rows[0].clientName, rows))
     .filter((row) => row.severity !== "quiet")
     .sort((a, b) => rank(a.severity) - rank(b.severity) || a.clientName.localeCompare(b.clientName));
 }
@@ -111,14 +114,15 @@ export function formatDailyDigest(
 
   const groups = new Map<string, DigestCampaign[]>();
   for (const campaign of visible) {
-    const list = groups.get(campaign.clientName) ?? [];
+    const key = clientGroupKey(campaign);
+    const list = groups.get(key) ?? [];
     list.push(campaign);
-    groups.set(campaign.clientName, list);
+    groups.set(key, list);
   }
 
-  const clients = [...groups.entries()]
-    .map(([clientName, rows]) => ({
-      clientName,
+  const clients = [...groups.values()]
+    .map((rows) => ({
+      clientName: rows[0].clientName,
       rows,
       sent: rows.reduce((sum, row) => sum + row.sent, 0),
       bounced: rows.reduce((sum, row) => sum + row.bounced, 0),

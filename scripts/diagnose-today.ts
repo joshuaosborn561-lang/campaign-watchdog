@@ -1,7 +1,7 @@
 import { SmartleadClient } from "../src/clients/smartlead.js";
 import { isNoiseCampaign } from "../src/lib/names.js";
 import { classifyInboxes } from "../src/lib/inboxes.js";
-import { parseCampaignLeadStats, parseSentCount } from "../src/lib/completion.js";
+import { parseCampaignLeadStats } from "../src/lib/completion.js";
 import { parseTodayVolume } from "../src/lib/pulse.js";
 import { unwrap } from "../src/lib/parse.js";
 import {
@@ -24,7 +24,7 @@ if (!apiKey) {
 }
 
 const now = new Date();
-const day = ymdInZone(now, "America/New_York");
+const day = ymdInZone(now, "America/Chicago");
 const smartlead = new SmartleadClient(apiKey);
 
 const campaigns = await smartlead.listCampaigns();
@@ -81,8 +81,8 @@ for (const campaign of campaigns) {
         dailySent: row.daily_sent_count ?? 0,
       })),
     );
-    const todayVolume = parseTodayVolume(today);
-    const sent = todayVolume.sent || parseSentCount(today);
+    const todayVolume = parseTodayVolume(today, day);
+    const sent = todayVolume.sent;
     const diagnosis = diagnoseSending({
       sent,
       remaining: stats?.remaining ?? null,

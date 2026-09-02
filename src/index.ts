@@ -31,14 +31,14 @@ async function main(): Promise<void> {
   const watch = new WatchService(config, smartlead, slack, state, supabase);
 
   let running = false;
-  let pulseQueued: string | null = null;
+  let pulseQueued: { reason: string; firedAt: Date } | null = null;
 
   const drainPulse = () => {
     running = false;
     if (!pulseQueued) return;
-    const reason = pulseQueued;
+    const queued = pulseQueued;
     pulseQueued = null;
-    void runPulse(reason);
+    void runPulse(queued.reason, queued.firedAt);
   };
 
   const runOnce = async (reason: string) => {
@@ -88,15 +88,15 @@ async function main(): Promise<void> {
     res.json({ ok: true });
   });
 
-  const runPulse = async (reason: string) => {
+  const runPulse = async (reason: string, firedAt = new Date()) => {
     if (running) {
-      pulseQueued = reason;
+      pulseQueued = { reason, firedAt };
       console.log(`[watchdog] queue ${reason}: watch busy`);
       return;
     }
     running = true;
     try {
-      const pulse = await watch.runPulse();
+      const pulse = await watch.runPulse(firedAt);
       console.log(
         `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} paused=${pulse.paused}`,
       );
@@ -120,13 +120,17 @@ async function main(): Promise<void> {
     console.log(`[watchdog] listening on ${config.host}:${config.port}`);
   });
 
-  cron.schedule(config.cron, () => {
-    void runOnce("cron");
-  });
+  cron.schedule(
+    config.cron,
+    () => {
+      void runOnce("cron");
+    },
+    { timezone: config.sendShortfallTimezone },
+  );
   cron.schedule(
     config.pulseCron,
     () => {
-      void runPulse("pulse");
+      void runPulse("pulse", new Date());
     },
     { timezone: config.sendShortfallTimezone },
   );

@@ -341,6 +341,48 @@ describe("digest", () => {
     );
   });
 
+  it("does not attribute another client's day volume to BCP", () => {
+    const text = formatDailyDigest("2026-09-01", [
+      row({
+        clientId: 542838,
+        clientName: "Bolder Cyber Partners",
+        campaignName: "BCP Healthcare Under-1k (No Team)",
+        sent: 0,
+        remaining: 5328,
+        inProgress: 5328,
+      }),
+      row({
+        clientId: 542838,
+        clientName: "Bolder Cyber Partners",
+        campaignName: "BCP Healthcare Over-1k (With Team)",
+        sent: 0,
+        remaining: 620,
+        inProgress: 620,
+      }),
+      row({
+        clientId: 999001,
+        clientName: "Culture Fits",
+        campaignName: "Healthcare Under-1k No Team",
+        sent: 5328,
+        remaining: 100,
+        inProgress: 100,
+      }),
+      row({
+        clientId: null,
+        clientName: "Unknown client",
+        campaignName: "Fleet leftover",
+        sent: 5294,
+        remaining: 10,
+        inProgress: 10,
+      }),
+    ]);
+    assert.match(text ?? "", /\*Bolder Cyber Partners\* — 0 sent/);
+    assert.doesNotMatch(text ?? "", /\*Bolder Cyber Partners\* — 5,948 sent/);
+    assert.match(text ?? "", /\*Culture Fits\* — 5,328 sent/);
+    assert.match(text ?? "", /\*Unknown client\* — 5,294 sent/);
+    assert.match(text ?? "", /Healthcare Under-1k \(No Team\) — 0 sent/);
+  });
+
   it("asks for a refill when a campaign is nearly done", () => {
     const at75 = formatNearlyDoneMessage({
       clientName: "Vasco Warranty",
