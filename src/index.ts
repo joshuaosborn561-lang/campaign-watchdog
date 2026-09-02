@@ -49,6 +49,7 @@ async function main(): Promise<void> {
     running = true;
     const started = Date.now();
     try {
+      await state.load();
       const result = await watch.run();
       const tokens = slack.tokenBundle();
       state.setSlackTokens({
@@ -96,6 +97,7 @@ async function main(): Promise<void> {
     }
     running = true;
     try {
+      await state.load();
       const pulse = await watch.runPulse(firedAt);
       console.log(
         `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} paused=${pulse.paused}`,
