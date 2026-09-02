@@ -10,7 +10,7 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const timeZone = "America/New_York";
+const timeZone = "America/Chicago";
 const now = new Date();
 const day = ymdInZone(now, timeZone);
 const hour = hourInZone(now, timeZone);
@@ -26,8 +26,9 @@ for (const campaign of campaigns) {
   if (status !== "ACTIVE" && status !== "PAUSED") continue;
   try {
     const today = await smartlead.getCampaignAnalyticsByDate(campaign.id, day, day);
-    const volume = parseTodayVolume(today);
+    const volume = parseTodayVolume(today, day);
     rows.push({
+      clientId: campaign.client_id ?? null,
       clientName:
         (campaign.client_id && clientName.get(campaign.client_id)) || "Unknown client",
       sent: volume.sent,

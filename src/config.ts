@@ -95,7 +95,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       mailboxMinTimeGapMins: optionalNumber("MAILBOX_MIN_TIME_GAP_MINS", 10),
       completionThresholds: csvNumbers("COMPLETION_THRESHOLDS", [50, 75, 90, 100]),
       sendShortfallAfterHour: optionalNumber("SEND_SHORTFALL_AFTER_HOUR", 17),
-      sendShortfallTimezone: optional("SEND_SHORTFALL_TIMEZONE", "America/New_York"),
+      sendShortfallTimezone: optional("SEND_SHORTFALL_TIMEZONE", "America/Chicago"),
       bounceAutoPauseThreshold: optionalNumber("BOUNCE_AUTO_PAUSE_THRESHOLD", 5),
       minBounceSample: optionalNumber("MIN_BOUNCE_SAMPLE", 20),
       cron: optional("CRON", "*/15 * * * *"),

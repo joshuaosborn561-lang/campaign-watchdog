@@ -5,6 +5,7 @@ import {
   isPulseWindow,
   parseTodayVolume,
   pulseSlot,
+  resolvePulseSlot,
   rollupClientPulse,
   stillPausedCampaigns,
 } from "./pulse.js";
@@ -12,15 +13,29 @@ import {
 describe("client pulse", () => {
   it("rolls sent and bounces up by client", () => {
     const rows = rollupClientPulse([
-      { clientName: "Goliath Cybersecurity", sent: 80, bounced: 1 },
-      { clientName: "Goliath Cybersecurity", sent: 13, bounced: 0 },
-      { clientName: "TechEvolution", sent: 6, bounced: 1 },
-      { clientName: "SalesGlider", sent: 0, bounced: 0 },
+      { clientId: 1, clientName: "Goliath Cybersecurity", sent: 80, bounced: 1 },
+      { clientId: 1, clientName: "Goliath Cybersecurity", sent: 13, bounced: 0 },
+      { clientId: 2, clientName: "TechEvolution", sent: 6, bounced: 1 },
+      { clientId: 3, clientName: "SalesGlider", sent: 0, bounced: 0 },
     ]);
     assert.equal(rows[0].clientName, "Goliath Cybersecurity");
     assert.equal(rows[0].sent, 93);
     assert.equal(rows[0].bounced, 1);
     assert.equal(rows[2].clientName, "SalesGlider");
+  });
+
+  it("does not bleed another client's day volume into BCP when names collide", () => {
+    const rows = rollupClientPulse([
+      { clientId: 999001, clientName: "Bolder Cyber Partners", sent: 5328, bounced: 0 },
+      { clientId: 542838, clientName: "Bolder Cyber Partners", sent: 0, bounced: 0 },
+      { clientId: null, clientName: "Unknown client", sent: 400, bounced: 0 },
+    ]);
+    const bcp = rows.find((row) => row.clientId === 542838);
+    const other = rows.find((row) => row.clientId === 999001);
+    const untagged = rows.find((row) => row.clientId == null);
+    assert.equal(bcp?.sent, 0);
+    assert.equal(other?.sent, 5328);
+    assert.equal(untagged?.sent, 400);
   });
 
   it("writes a short per-client Slack pulse", () => {
@@ -101,9 +116,50 @@ describe("client pulse", () => {
 
   it("reads today's sent and bounce from analytics-by-date", () => {
     assert.deepEqual(
-      parseTodayVolume({ sent_count: "32", bounce_count: "2" }),
+      parseTodayVolume({ sent_count: "32", bounce_count: "2" }, "2026-09-01"),
       { sent: 32, bounced: 2 },
     );
+  });
+
+  it("keeps a true 0-send day instead of using lifetime sent_count", () => {
+    assert.deepEqual(
+      parseTodayVolume(
+        {
+          sent_count: 5328,
+          bounce_count: 12,
+          data: [{ date: "2026-09-01", sent_count: 0, bounce_count: 0 }],
+        },
+        "2026-09-01",
+      ),
+      { sent: 0, bounced: 0 },
+    );
+    assert.deepEqual(
+      parseTodayVolume(
+        {
+          sent_count: 620,
+          days: [
+            { date: "2026-08-31", sent_count: 620, bounce_count: 1 },
+            { date: "2026-09-01", sent_count: 0, bounce_count: 0 },
+          ],
+        },
+        "2026-09-01",
+      ),
+      { sent: 0, bounced: 0 },
+    );
+  });
+
+  it("does not sum other days when the requested Chicago day has no row", () => {
+    assert.deepEqual(
+      parseTodayVolume(
+        {
+          sent_count: 5294,
+          data: [{ date: "2026-08-31", sent_count: 5294, bounce_count: 3 }],
+        },
+        "2026-09-01",
+      ),
+      { sent: 0, bounced: 0 },
+    );
+    assert.deepEqual(parseTodayVolume({ data: [] }, "2026-09-01"), { sent: 0, bounced: 0 });
   });
 
   it("only fires 8am–4pm ET Monday–Thursday, not the 5pm wrap-up hour", () => {
@@ -150,5 +206,41 @@ describe("client pulse", () => {
       false,
     );
     assert.equal(pulseSlot("2026-08-27", 14), "2026-08-27T14");
+  });
+
+  it("still posts a queued pulse after the hour when the watch ran long", () => {
+    const hours = [8, 10, 12, 14, 16];
+    const days = [1, 2, 3, 4];
+    const zone = "America/Chicago";
+    // Tue 9/1 10:05am CT — on the slot
+    assert.deepEqual(
+      resolvePulseSlot(new Date("2026-09-01T15:05:00.000Z"), zone, hours, days)?.slot,
+      "2026-09-01T10",
+    );
+    // Tue 9/1 10:40am CT — queued behind the 15-minute watch
+    assert.deepEqual(
+      resolvePulseSlot(new Date("2026-09-01T15:40:00.000Z"), zone, hours, days)?.slot,
+      "2026-09-01T10",
+    );
+    // Tue 9/1 11:50am CT — still the 10am slot (grace), not silent
+    assert.deepEqual(
+      resolvePulseSlot(new Date("2026-09-01T16:50:00.000Z"), zone, hours, days)?.slot,
+      "2026-09-01T10",
+    );
+    // Tue 9/1 12:05pm CT — next slot
+    assert.deepEqual(
+      resolvePulseSlot(new Date("2026-09-01T17:05:00.000Z"), zone, hours, days)?.slot,
+      "2026-09-01T12",
+    );
+    // Tue 9/1 5:10pm CT — delayed 4pm pulse may still post; cron does not fire at 5
+    assert.deepEqual(
+      resolvePulseSlot(new Date("2026-09-01T22:10:00.000Z"), zone, hours, days)?.slot,
+      "2026-09-01T16",
+    );
+    // Tue 9/1 6:00pm CT — past grace, digest-only
+    assert.equal(
+      resolvePulseSlot(new Date("2026-09-01T23:00:00.000Z"), zone, hours, days),
+      null,
+    );
   });
 });

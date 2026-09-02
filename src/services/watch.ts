@@ -1,7 +1,6 @@
 import type { AppConfig } from "../config.js";
 import {
   SmartleadClient,
-  clientDisplayName,
   sleep,
   type SmartleadCampaign,
   type SmartleadClientRecord,
@@ -15,7 +14,6 @@ import {
   completionPercent,
   newThresholds,
   parseCampaignLeadStats,
-  parseSentCount,
   thresholdsReached,
   type ClientCampaignLeadRow,
 } from "../lib/completion.js";
@@ -34,11 +32,11 @@ import {
 } from "../lib/schedule.js";
 import { diagnoseSending } from "../lib/sending.js";
 import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
+import { resolveClient } from "../lib/clients.js";
 import {
   formatClientPulse,
-  isPulseWindow,
   parseTodayVolume,
-  pulseSlot,
+  resolvePulseSlot,
   rollupClientPulse,
   stillPausedCampaigns,
   type PausedPulseRow,
@@ -46,6 +44,8 @@ import {
 import { unwrap } from "../lib/parse.js";
 import { hourInZone, ymdInZone } from "../lib/time.js";
 import type { StateStore } from "../state/store.js";
+
+export { resolveClient, resolveClientName } from "../lib/clients.js";
 
 export interface WatchResult {
   scanned: number;
@@ -167,16 +167,17 @@ export class WatchService {
 
   async runPulse(now = new Date()): Promise<{ posted: boolean; clients: number; paused: number }> {
     const timeZone = this.config.sendShortfallTimezone;
-    if (!isPulseWindow(now, timeZone, this.config.pulseHours, this.config.pulseWeekdays)) {
+    const resolved = resolvePulseSlot(
+      now,
+      timeZone,
+      this.config.pulseHours,
+      this.config.pulseWeekdays,
+    );
+    if (!resolved) {
       return { posted: false, clients: 0, paused: 0 };
     }
 
-    const day = ymdInZone(now, timeZone);
-    const hour = hourInZone(now, timeZone);
-    if (hour >= this.config.sendShortfallAfterHour) {
-      return { posted: false, clients: 0, paused: 0 };
-    }
-    const slot = pulseSlot(day, hour);
+    const { day, hour, slot } = resolved;
     const key = `pulse:v2:${slot}`;
     if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
       this.state.setLastPulseSlot(slot);
@@ -194,22 +195,31 @@ export class WatchService {
         : Promise.resolve(new Map<number, string>()),
     ]);
     const clientsById = new Map(clients.map((client) => [client.id, client]));
-    const rows: Array<{ clientName: string; sent: number; bounced: number }> = [];
-    const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns).map((campaign) => ({
-      clientName: resolveClientName(campaign, clientsById, supabaseCampaigns, registry),
-      campaignName: campaign.name,
-    }));
+    const rows: Array<{
+      clientId: number | null;
+      clientName: string;
+      sent: number;
+      bounced: number;
+    }> = [];
+    const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns).map((campaign) => {
+      const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
+      return {
+        clientName: resolvedClient.clientName,
+        campaignName: campaign.name,
+      };
+    });
 
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
       const status = String(campaign.status ?? "").toUpperCase();
       if (status !== "ACTIVE" && status !== "PAUSED") continue;
-      const clientName = resolveClientName(campaign, clientsById, supabaseCampaigns, registry);
+      const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
       try {
         const today = await this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day);
-        const volume = parseTodayVolume(today);
+        const volume = parseTodayVolume(today, day);
         rows.push({
-          clientName,
+          clientId: resolvedClient.clientId,
+          clientName: resolvedClient.clientName,
           sent: volume.sent,
           bounced: volume.bounced,
         });
@@ -263,22 +273,7 @@ export class WatchService {
   }): Promise<void> {
     const snapshot = this.state.snapshot(input.campaign.id);
     const firstSeen = !snapshot.seen;
-    const clientName = resolveClientName(
-      input.campaign,
-      input.clientsById,
-      input.supabaseCampaigns,
-      input.registry,
-    );
     const campaignName = input.campaign.name;
-    const inventoryRow: ClientCampaignLeadRow = {
-      id: input.campaign.id,
-      clientId: input.campaign.client_id ?? null,
-      clientName,
-      campaignName,
-      status: input.status,
-      remaining: null,
-    };
-    input.inventory.push(inventoryRow);
 
     const [detail, settings, analytics, statistics] = await Promise.all([
       this.smartlead.getCampaign(input.campaign.id).catch(() => input.campaign),
@@ -286,6 +281,25 @@ export class WatchService {
       this.smartlead.getCampaignAnalytics(input.campaign.id).catch(() => null),
       this.smartlead.getCampaignStatistics(input.campaign.id).catch(() => null),
     ]);
+
+    const resolved = resolveClient(
+      input.campaign,
+      input.clientsById,
+      input.supabaseCampaigns,
+      input.registry,
+      detail,
+    );
+    const clientName = resolved.clientName;
+    const clientId = resolved.clientId;
+    const inventoryRow: ClientCampaignLeadRow = {
+      id: input.campaign.id,
+      clientId,
+      clientName,
+      campaignName,
+      status: input.status,
+      remaining: null,
+    };
+    input.inventory.push(inventoryRow);
 
     const stats =
       parseCampaignLeadStats(analytics) ??
@@ -307,14 +321,19 @@ export class WatchService {
           snapshot.notifiedThresholds,
           this.config.completionThresholds,
         );
+        const slackable = new Set(completionAlertsToPost(fresh, percent));
+        // Record 50% (and anything we will not Slack) now. 75/90/100 stay
+        // pending until Slack succeeds so an after-hours skip cannot eat them.
         for (const threshold of fresh) {
-          snapshot.notifiedThresholds.push(threshold);
+          if (isCompletionIgnoredCampaign(campaignName) || !slackable.has(threshold)) {
+            snapshot.notifiedThresholds.push(threshold);
+          }
         }
         if (!isCompletionIgnoredCampaign(campaignName)) {
-          for (const threshold of completionAlertsToPost(fresh, percent)) {
+          for (const threshold of slackable) {
             input.pendingCompletion.push({
               campaignId: input.campaign.id,
-              clientId: input.campaign.client_id ?? null,
+              clientId,
               clientName,
               campaignName,
               threshold,
@@ -393,9 +412,10 @@ export class WatchService {
         const todayVolume = parseTodayVolume(
           await this.smartlead
             .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
-            .catch(() => analytics),
+            .catch(() => null),
+          input.day,
         );
-        const sentToday = todayVolume.sent || parseSentCount(analytics);
+        const sentToday = todayVolume.sent;
         const diagnosis = diagnoseSending({
           sent: sentToday,
           remaining: stats.remaining,
@@ -404,6 +424,7 @@ export class WatchService {
           messagePerDay: this.config.messagePerDay,
         });
         input.digestRows.push({
+          clientId,
           clientName,
           campaignName,
           sent: sentToday,
@@ -423,9 +444,11 @@ export class WatchService {
       const todayVolume = parseTodayVolume(
         await this.smartlead
           .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
-          .catch(() => analytics),
+          .catch(() => null),
+        input.day,
       );
       input.digestRows.push({
+        clientId,
         clientName,
         campaignName,
         sent: todayVolume.sent,
@@ -449,16 +472,15 @@ export class WatchService {
   private async flushCompletionAlerts(
     pending: PendingCompletion[],
     inventory: ClientCampaignLeadRow[],
-    now: Date,
+    _now: Date,
     result: WatchResult,
   ): Promise<void> {
-    const afterHours =
-      hourInZone(now, this.config.sendShortfallTimezone) >= this.config.sendShortfallAfterHour;
-    if (afterHours) return;
-
     for (const item of pending) {
       const key = `completion:v1:${item.campaignId}:${item.threshold}`;
-      if (await this.alreadySent(key)) continue;
+      if (await this.alreadySent(key)) {
+        this.markThresholdNotified(item.campaignId, item.threshold);
+        continue;
+      }
       const text =
         item.threshold >= 100
           ? formatFinishedMessage({
@@ -494,8 +516,17 @@ export class WatchService {
           total: item.total,
         },
       });
+      this.markThresholdNotified(item.campaignId, item.threshold);
       result.completion += 1;
     }
+  }
+
+  private markThresholdNotified(campaignId: number, threshold: number): void {
+    const snapshot = this.state.snapshot(campaignId);
+    if (!snapshot.notifiedThresholds.includes(threshold)) {
+      snapshot.notifiedThresholds.push(threshold);
+    }
+    this.state.put(campaignId, snapshot);
   }
 
   private async alreadySent(key: string): Promise<boolean> {
@@ -529,22 +560,3 @@ export class WatchService {
   }
 }
 
-export function resolveClientName(
-  campaign: SmartleadCampaign,
-  clientsById: Map<number, SmartleadClientRecord>,
-  supabaseCampaigns: Map<number, CampaignNameRow>,
-  registry: Map<number, string>,
-): string {
-  const supabaseRow = supabaseCampaigns.get(campaign.id);
-  if (supabaseRow?.client_name?.trim()) return supabaseRow.client_name.trim();
-  if (campaign.client_id && registry.get(campaign.client_id)) {
-    return registry.get(campaign.client_id)!;
-  }
-  if (campaign.client_id && clientsById.get(campaign.client_id)) {
-    return clientDisplayName(clientsById.get(campaign.client_id));
-  }
-  if (supabaseRow?.smartlead_client_id && registry.get(supabaseRow.smartlead_client_id)) {
-    return registry.get(supabaseRow.smartlead_client_id)!;
-  }
-  return "Unknown client";
-}

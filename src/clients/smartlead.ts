@@ -130,7 +130,11 @@ function normalizeCampaign(row: Record<string, unknown>): SmartleadCampaign | nu
     id,
     name,
     status: pickString(root, ["status"]) ?? "",
-    client_id: asNumber(root.client_id) ?? null,
+    client_id:
+      asNumber(root.client_id) ??
+      asNumber(root.clientId) ??
+      asNumber(unwrap(root.client)?.id) ??
+      null,
   };
 }
 

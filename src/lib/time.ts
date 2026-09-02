@@ -15,13 +15,19 @@ export function ymdInZone(now: Date, timeZone: string): string {
 }
 
 export function hourInZone(now: Date, timeZone: string): number {
-  const hour = new Intl.DateTimeFormat("en-US", {
+  return Math.floor(minutesInZone(now, timeZone) / 60);
+}
+
+export function minutesInZone(now: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hour: "numeric",
+    minute: "numeric",
     hour12: false,
-  }).format(now);
-  const parsed = Number(hour);
-  return Number.isFinite(parsed) ? parsed % 24 : now.getUTCHours();
+  }).formatToParts(now);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0") % 24;
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  return hour * 60 + (Number.isFinite(minute) ? minute : 0);
 }
 
 export function weekdayInZone(now: Date, timeZone: string): number {
