@@ -1,7 +1,7 @@
 {
   "name": "campaign-watchdog",
   "version": "1.0.0",
-  "description": "Slack alerts for Smartlead campaign completion, autobounce pauses, and daily sending shortfalls",
+  "description": "Slack alerts for Smartlead campaign completion, autobounce pauses, daily sending shortfalls, and HeyReach LinkedIn runway",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {

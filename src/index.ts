@@ -63,7 +63,7 @@ async function main(): Promise<void> {
       }
       await state.save();
       console.log(
-        `[watchdog] ${reason} scanned=${result.scanned} completion=${result.completion} autobounce=${result.autobounce} sending=${result.sending} digest=${result.digest} errors=${result.errors.length} ${Date.now() - started}ms`,
+        `[watchdog] ${reason} scanned=${result.scanned} completion=${result.completion} autobounce=${result.autobounce} sending=${result.sending} digest=${result.digest} heyreach=${result.heyreach} errors=${result.errors.length} ${Date.now() - started}ms`,
       );
       if (result.errors.length) {
         console.warn("[watchdog] errors", result.errors.slice(0, 20));
