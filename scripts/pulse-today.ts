@@ -1,6 +1,11 @@
 import { SmartleadClient } from "../src/clients/smartlead.js";
 import { isNoiseCampaign } from "../src/lib/names.js";
-import { parseTodayVolume, rollupClientPulse, formatClientPulse } from "../src/lib/pulse.js";
+import {
+  formatClientPulse,
+  isPulseExcludedCampaign,
+  parseTodayVolume,
+  rollupClientPulse,
+} from "../src/lib/pulse.js";
 import { hourInZone, ymdInZone } from "../src/lib/time.js";
 import { sleep } from "../src/lib/http.js";
 
@@ -22,7 +27,7 @@ const rows: Array<{ clientName: string; sent: number; bounced: number }> = [];
 
 for (const campaign of campaigns) {
   const status = String(campaign.status ?? "").toUpperCase();
-  if (isNoiseCampaign(campaign.name)) continue;
+  if (isNoiseCampaign(campaign.name) || isPulseExcludedCampaign(campaign)) continue;
   if (status !== "ACTIVE" && status !== "PAUSED") continue;
   try {
     const today = await smartlead.getCampaignAnalyticsByDate(campaign.id, day, day);

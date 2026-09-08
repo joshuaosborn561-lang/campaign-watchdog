@@ -293,6 +293,52 @@ describe("WatchService attribution and flags", () => {
     );
   });
 
+  it("omits legacy Unknown-client leftovers from the pulse Paused list and sent rollup", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({
+            id: 3628943,
+            name: "Positive",
+            status: "PAUSED",
+            client_id: null,
+          }),
+          campaign({
+            id: 11,
+            name: "MSRS Ticket Offer Propert Manager",
+            status: "PAUSED",
+            client_id: null,
+          }),
+          campaign({
+            id: 12,
+            name: "BCP Generic (No Team)",
+            status: "PAUSED",
+            client_id: BCP,
+          }),
+        ],
+        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+        analyticsByDate: {
+          3628943: { sent_count: 0, bounce_count: 0 },
+          11: { sent_count: 0, bounce_count: 0 },
+          12: { sent_count: 0, bounce_count: 0 },
+        },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.posted, true);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*Paused\* \(1\)/);
+        assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
+        assert.doesNotMatch(text, /Unknown client/);
+        assert.doesNotMatch(text, /Positive/);
+        assert.doesNotMatch(text, /Propert Manager/);
+      },
+    );
+  });
+
   it("Slacks nearly-done and finished after hours instead of eating the flag", async () => {
     const slack = fakeSlack();
     await withService(

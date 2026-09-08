@@ -40,6 +40,7 @@ import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
 import { resolveClient } from "../lib/clients.js";
 import {
   formatClientPulse,
+  isPulseExcludedCampaign,
   parseTodayVolume,
   resolvePulseSlot,
   rollupClientPulse,
@@ -226,22 +227,28 @@ export class WatchService {
         : Promise.resolve(new Map<number, string>()),
     ]);
     const clientsById = new Map(clients.map((client) => [client.id, client]));
+    const pulseExclude = {
+      ids: this.config.pulseExcludeCampaignIds,
+      names: this.config.pulseExcludeCampaignNames,
+    };
     const rows: Array<{
       clientId: number | null;
       clientName: string;
       sent: number;
       bounced: number;
     }> = [];
-    const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns).map((campaign) => {
+    const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns, pulseExclude).map((campaign) => {
       const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
       return {
         clientName: resolvedClient.clientName,
         campaignName: campaign.name,
+        campaignId: campaign.id,
       };
     });
 
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
+      if (isPulseExcludedCampaign(campaign, pulseExclude)) continue;
       const status = String(campaign.status ?? "").toUpperCase();
       if (status !== "ACTIVE" && status !== "PAUSED") continue;
       const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
@@ -273,6 +280,7 @@ export class WatchService {
         clients: rolled,
         bounceWarn: this.config.bounceAutoPauseThreshold,
         paused,
+        exclude: pulseExclude,
       }),
       {
         key,

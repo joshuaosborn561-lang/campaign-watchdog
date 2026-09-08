@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   formatClientPulse,
+  isPulseExcludedCampaign,
   isPulseWindow,
   parseTodayVolume,
   pulseSlot,
@@ -109,9 +110,80 @@ describe("client pulse", () => {
         "BCP Generic (No Team)",
         "Goliath L1 Financial Services Tickets",
         "SalesGlider Nurture",
-        "Nieto Law Firms",
       ],
     );
+  });
+
+  it("excludes legacy Unknown-client leftovers by name (case-insensitive, including the MSRS typo)", () => {
+    const paused = stillPausedCampaigns([
+      { id: 1, name: "msrs ticket offer propert manager", status: "PAUSED" },
+      { id: 2, name: "MSRS2 Ticket Offer Property Manager", status: "PAUSED" },
+      { id: 3, name: "Nieto Law Firms", status: "PAUSED" },
+      { id: 4, name: "positive", status: "PAUSED" },
+      { id: 5, name: "BCP Generic (With Team)", status: "PAUSED" },
+      { id: 6, name: "SalesGlider Nurture", status: "PAUSED" },
+    ]);
+    assert.deepEqual(
+      paused.map((row) => row.name),
+      ["BCP Generic (With Team)", "SalesGlider Nurture"],
+    );
+    assert.equal(isPulseExcludedCampaign({ name: "MSRS Ticket Offer Propert Manager" }), true);
+    assert.equal(isPulseExcludedCampaign({ name: "msrs ticket offer propert manager" }), true);
+    assert.equal(isPulseExcludedCampaign({ name: "SalesGlider Nurture" }), false);
+  });
+
+  it("excludes legacy leftovers by id even when the name is missing or renamed", () => {
+    assert.equal(isPulseExcludedCampaign({ id: 3437329, name: "Renamed sports offer" }), true);
+    assert.equal(isPulseExcludedCampaign({ id: 3628943, name: "" }), true);
+    const paused = stillPausedCampaigns([
+      { id: 3867914, name: "Nieto RB2B (copy)", status: "PAUSED" },
+      { id: 999999, name: "Culture Fits Sports Offer", status: "PAUSED" },
+    ]);
+    assert.deepEqual(
+      paused.map((row) => row.name),
+      ["Culture Fits Sports Offer"],
+    );
+  });
+
+  it("does not create an Unknown client sent rollup from excluded leftovers only", () => {
+    const rows = [
+      { clientId: null, clientName: "Unknown client", sent: 0, bounced: 0 },
+      { clientId: null, clientName: "Unknown client", sent: 0, bounced: 0 },
+      { clientId: 542838, clientName: "Bolder Cyber Partners", sent: 12, bounced: 0 },
+    ];
+    const campaigns = [
+      { id: 3628943, name: "Positive" },
+      { id: 1, name: "MSRS Ticket Offer Propert Manager" },
+      { id: 100, name: "BCP Healthcare Under-1k (No Team)" },
+    ];
+    const kept = rows.filter((_, index) => !isPulseExcludedCampaign(campaigns[index]));
+    const rolled = rollupClientPulse(kept);
+    assert.equal(rolled.some((row) => row.clientName === "Unknown client"), false);
+    assert.equal(rolled.length, 1);
+    assert.equal(rolled[0].clientName, "Bolder Cyber Partners");
+  });
+
+  it("omits excluded leftovers from the Slack Paused list but keeps other paused campaigns", () => {
+    const text = formatClientPulse({
+      day: "2026-08-27",
+      hour: 10,
+      bounceWarn: 5,
+      clients: [{ clientName: "Bolder Cyber Partners", sent: 0, bounced: 0 }],
+      paused: [
+        { clientName: "Unknown client", campaignName: "Nieto Spring", campaignId: 1 },
+        { clientName: "Unknown client", campaignName: "Positive", campaignId: 3628943 },
+        {
+          clientName: "Bolder Cyber Partners",
+          campaignName: "BCP Generic (No Team)",
+          campaignId: 200,
+        },
+      ],
+    });
+    assert.match(text, /\*Paused\* \(1\)/);
+    assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
+    assert.doesNotMatch(text, /Unknown client/);
+    assert.doesNotMatch(text, /Nieto Spring/);
+    assert.doesNotMatch(text, /Positive/);
   });
 
   it("reads today's sent and bounce from analytics-by-date", () => {
