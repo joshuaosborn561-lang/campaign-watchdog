@@ -1,3 +1,8 @@
+import {
+  DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
+  DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
+} from "./lib/pulse.js";
+
 function required(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`Missing required env var ${name}`);
@@ -39,6 +44,39 @@ function csvStrings(name: string, fallback: string[]): string[] {
     .split(",")
     .map((part) => part.trim().toUpperCase())
     .filter(Boolean);
+}
+
+/** Comma or newline list. Env values are merged onto `fallback` (extend). */
+function csvOrNewlineStrings(name: string, fallback: string[]): string[] {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const extra = raw
+    .split(/[\n,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!extra.length) return fallback;
+  return uniqueStringsCaseInsensitive([...fallback, ...extra]);
+}
+
+function csvNumbersMerge(name: string, fallback: number[]): number[] {
+  const extra = csvNumbers(name, []);
+  return uniqueNumbers([...fallback, ...extra]);
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values)];
+}
+
+function uniqueStringsCaseInsensitive(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const key = value.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value.trim());
+  }
+  return out;
 }
 
 export interface HeyReachWorkspaceConfig {
@@ -164,6 +202,8 @@ export interface AppConfig {
   heyreachRunwayDays: number;
   heyreachPaceLookbackDays: number;
   heyreachWeekdays: number[];
+  pulseExcludeCampaignIds: number[];
+  pulseExcludeCampaignNames: string[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -209,6 +249,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       heyreachRunwayDays: optionalNumber("HEYREACH_RUNWAY_DAYS", 7),
       heyreachPaceLookbackDays: optionalNumber("HEYREACH_PACE_LOOKBACK_DAYS", 14),
       heyreachWeekdays: csvNumbers("HEYREACH_WEEKDAYS", [1, 2, 3, 4, 5]),
+      pulseExcludeCampaignIds: csvNumbersMerge(
+        "PULSE_EXCLUDE_CAMPAIGN_IDS",
+        DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
+      ),
+      pulseExcludeCampaignNames: csvOrNewlineStrings(
+        "PULSE_EXCLUDE_CAMPAIGN_NAMES",
+        DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
+      ),
     };
   } finally {
     process.env = previous;

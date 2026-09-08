@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { loadConfig } from "./config.js";
+import {
+  DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
+  DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
+} from "./lib/pulse.js";
 
 describe("loadConfig", () => {
   it("defaults the Slack channel and 50/75/90/100 thresholds", () => {
@@ -18,6 +22,27 @@ describe("loadConfig", () => {
     assert.deepEqual(config.heyreachWorkspaces, []);
     assert.deepEqual(config.heyreachExcludeIds, [530529]);
     assert.equal(config.heyreachRunwayDays, 7);
+    assert.deepEqual(config.pulseExcludeCampaignIds, DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS);
+    assert.deepEqual(config.pulseExcludeCampaignNames, DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES);
+    assert.ok(config.pulseExcludeCampaignNames.includes("MSRS Ticket Offer Propert Manager"));
+  });
+
+  it("merges extra pulse exclude ids and names onto the built-in defaults", () => {
+    const config = loadConfig({
+      SMARTLEAD_API_KEY: "sl-key",
+      SLACK_BOT_TOKEN: "xoxb-test",
+      PULSE_EXCLUDE_CAMPAIGN_IDS: "111,3628943",
+      PULSE_EXCLUDE_CAMPAIGN_NAMES: "Extra Leftover\npositive",
+    } as NodeJS.ProcessEnv);
+    assert.ok(config.pulseExcludeCampaignIds.includes(111));
+    assert.ok(config.pulseExcludeCampaignIds.includes(3628943));
+    assert.ok(config.pulseExcludeCampaignIds.includes(3437329));
+    assert.ok(config.pulseExcludeCampaignNames.includes("Extra Leftover"));
+    assert.ok(config.pulseExcludeCampaignNames.includes("Positive"));
+    assert.equal(
+      config.pulseExcludeCampaignNames.filter((name) => name.toLowerCase() === "positive").length,
+      1,
+    );
   });
 
   it("reads HeyReach workspace keys from Railway env and skips master", () => {

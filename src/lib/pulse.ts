@@ -13,16 +13,65 @@ export interface ClientPulse {
 export interface PausedPulseRow {
   clientName: string;
   campaignName: string;
+  campaignId?: number;
+}
+
+export interface PulseExclude {
+  ids?: Iterable<number>;
+  names?: Iterable<string>;
+}
+
+/** Known Smartlead IDs for legacy Nieto / MSRS / Positive leftovers. */
+export const DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS = [
+  3437329, // Nieto Sports or Airpods Offer/Proprietary Tech
+  3628940, // MSRS2 Ticket Offer Property Manager
+  3628943, // Positive
+  3867914, // Nieto RB2B
+  3867917, // Nieto Houston Floodzones
+];
+
+/**
+ * Intentional Unknown-client leftovers (Nieto / MSRS / Positive).
+ * Keep the "Propert" typo on the first MSRS name — that is the live campaign title.
+ */
+export const DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES = [
+  "MSRS Ticket Offer Propert Manager",
+  "MSRS2 Ticket Offer Property Manager",
+  "Nieto Astros Offer/Proprietary Tech",
+  "Nieto Houston Floodzones",
+  "Nieto Law Firms",
+  "Nieto MSPs 20-200",
+  "Nieto RB2B",
+  "Nieto Sports or Airpods Offer/Proprietary Tech",
+  "Nieto Spring",
+  "Positive",
+];
+
+export function isPulseExcludedCampaign(
+  campaign: { id?: number | null; name?: string },
+  exclude?: PulseExclude,
+): boolean {
+  const ids = new Set(exclude?.ids ?? DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS);
+  const names = new Set(
+    [...(exclude?.names ?? DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES)]
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (campaign.id != null && ids.has(Number(campaign.id))) return true;
+  const name = String(campaign.name ?? "").trim().toLowerCase();
+  return name.length > 0 && names.has(name);
 }
 
 /** Every still-paused real campaign, including ones left paused on purpose (e.g. Generic). */
-export function stillPausedCampaigns<T extends { name: string; status: string }>(
+export function stillPausedCampaigns<T extends { id?: number; name: string; status: string }>(
   campaigns: T[],
+  exclude?: PulseExclude,
 ): T[] {
   return campaigns.filter(
     (campaign) =>
       String(campaign.status ?? "").toUpperCase() === "PAUSED" &&
-      !isNoiseCampaign(campaign.name),
+      !isNoiseCampaign(campaign.name) &&
+      !isPulseExcludedCampaign(campaign, exclude),
   );
 }
 
@@ -172,6 +221,7 @@ export function formatClientPulse(input: {
   clients: ClientPulse[];
   bounceWarn: number;
   paused?: PausedPulseRow[];
+  exclude?: PulseExclude;
 }): string {
   const totalSent = input.clients.reduce((sum, row) => sum + row.sent, 0);
   const totalBounced = input.clients.reduce((sum, row) => sum + row.bounced, 0);
@@ -186,11 +236,18 @@ export function formatClientPulse(input: {
   );
   const paused = [...(input.paused ?? [])]
     .filter((row) => !isNoiseCampaign(row.campaignName))
+    .filter(
+      (row) =>
+        !isPulseExcludedCampaign(
+          { id: row.campaignId, name: row.campaignName },
+          input.exclude,
+        ),
+    )
     .sort(
-    (a, b) =>
-      a.clientName.localeCompare(b.clientName) ||
-      a.campaignName.localeCompare(b.campaignName),
-  );
+      (a, b) =>
+        a.clientName.localeCompare(b.clientName) ||
+        a.campaignName.localeCompare(b.campaignName),
+    );
   if (paused.length) {
     lines.push("");
     lines.push(`*Paused* (${paused.length})`);
