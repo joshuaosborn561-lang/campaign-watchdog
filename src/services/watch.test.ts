@@ -28,7 +28,17 @@ function fakeSmartlead(options: {
   analyticsByDate?: Record<number, unknown>;
   analytics?: Record<number, unknown>;
   detail?: Record<number, unknown>;
+  emailAccounts?: Record<number, Array<{
+    id: number;
+    from_email?: string;
+    is_smtp_success?: boolean;
+    is_imap_success?: boolean;
+    daily_sent_count?: number;
+  }>>;
 }) {
+  const defaultInbox = [
+    { id: 1, from_email: "a@x.com", is_smtp_success: true, is_imap_success: true, daily_sent_count: 0 },
+  ];
   return {
     listCampaigns: async () => options.campaigns,
     listClients: async () => options.clients ?? [],
@@ -49,9 +59,7 @@ function fakeSmartlead(options: {
       }
       throw new Error(`no by-date for ${id}`);
     },
-    getCampaignEmailAccounts: async () => [
-      { id: 1, from_email: "a@x.com", is_smtp_success: true, is_imap_success: true, daily_sent_count: 0 },
-    ],
+    getCampaignEmailAccounts: async (id: number) => options.emailAccounts?.[id] ?? defaultInbox,
   };
 }
 
@@ -287,13 +295,78 @@ describe("WatchService attribution and flags", () => {
         const result = await watch.runPulse(firedAt);
         assert.equal(result.posted, true);
         assert.match(slack.posted[0] ?? "", /Tue 9\/1 10:00am — sent today/);
-        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent/);
+        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent · too few senders/);
         assert.doesNotMatch(slack.posted[0] ?? "", /5,328 sent/);
+        assert.doesNotMatch(slack.posted[0] ?? "", /Healthcare Under-1k/);
       },
     );
   });
 
-  it("omits legacy Unknown-client leftovers from the pulse Paused list and sent rollup", async () => {
+  it("does not diagnose 0-send clients on the 8am pulse", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+        ],
+        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+        analyticsByDate: {
+          100: { sent_count: 0, bounce_count: 0 },
+        },
+        analytics: { 100: lifetimeBcpUnder },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T13:05:00.000Z"));
+        assert.equal(result.posted, true);
+        assert.match(slack.posted[0] ?? "", /Tue 9\/1 8:00am — sent today/);
+        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent$/m);
+        assert.doesNotMatch(slack.posted[0] ?? "", /too few/);
+      },
+    );
+  });
+
+  it("labels a 0-send client as too few leads when the active list is empty", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+        ],
+        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+        analyticsByDate: {
+          100: { sent_count: 0, bounce_count: 0 },
+        },
+        analytics: {
+          100: {
+            total_count: "12",
+            sent_count: "12",
+            campaign_lead_stats: { total: 12, notStarted: 0, inprogress: 0 },
+          },
+        },
+        emailAccounts: {
+          100: Array.from({ length: 8 }, (_, index) => ({
+            id: index + 1,
+            from_email: `a${index}@x.com`,
+            is_smtp_success: true,
+            is_imap_success: true,
+            daily_sent_count: 0,
+          })),
+        },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.posted, true);
+        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent · too few leads/);
+        assert.doesNotMatch(slack.posted[0] ?? "", /Healthcare Under-1k/);
+      },
+    );
+  });
+
+  it("omits legacy Unknown-client leftovers from the pulse Paused count and sent rollup", async () => {
     const slack = fakeSlack();
     await withService(
       fakeSmartlead({
@@ -330,11 +403,13 @@ describe("WatchService attribution and flags", () => {
         const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
         assert.equal(result.posted, true);
         const text = slack.posted[0] ?? "";
-        assert.match(text, /\*Paused\* \(1\)/);
-        assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
+        assert.match(text, /Paused: 1/);
+        assert.doesNotMatch(text, /\*Paused\*/);
+        assert.doesNotMatch(text, /Generic \(No Team\)/);
         assert.doesNotMatch(text, /Unknown client/);
         assert.doesNotMatch(text, /Positive/);
         assert.doesNotMatch(text, /Propert Manager/);
+        assert.doesNotMatch(text, /• /);
       },
     );
   });

@@ -37,15 +37,19 @@ import {
 } from "../lib/schedule.js";
 import { diagnoseSending } from "../lib/sending.js";
 import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
-import { resolveClient } from "../lib/clients.js";
+import { clientGroupKey, resolveClient } from "../lib/clients.js";
 import {
+  classifyClientPulseShortfall,
   formatClientPulse,
   isPulseExcludedCampaign,
   parseTodayVolume,
+  PULSE_SHORTFALL_AFTER_HOUR,
   resolvePulseSlot,
   rollupClientPulse,
   stillPausedCampaigns,
+  type ClientPulse,
   type PausedPulseRow,
+  type PulseExclude,
 } from "../lib/pulse.js";
 import { unwrap } from "../lib/parse.js";
 import {
@@ -273,6 +277,17 @@ export class WatchService {
     const rolled = rollupClientPulse(rows);
     if (!rolled.length && !paused.length) return { posted: false, clients: 0, paused: 0 };
 
+    if (hour >= PULSE_SHORTFALL_AFTER_HOUR) {
+      await this.attachPulseShortfalls({
+        clients: rolled,
+        campaigns,
+        clientsById,
+        supabaseCampaigns,
+        registry,
+        pulseExclude,
+      });
+    }
+
     await this.notify(
       formatClientPulse({
         day,
@@ -294,6 +309,65 @@ export class WatchService {
     this.state.setLastPulseSlot(slot);
     await this.state.save();
     return { posted: true, clients: rolled.length, paused: paused.length };
+  }
+
+  /** Diagnose 0-send clients that still have an ACTIVE list (leads vs senders). */
+  private async attachPulseShortfalls(input: {
+    clients: ClientPulse[];
+    campaigns: SmartleadCampaign[];
+    clientsById: Map<number, SmartleadClientRecord>;
+    supabaseCampaigns: Map<number, CampaignNameRow>;
+    registry: Map<number, string>;
+    pulseExclude: PulseExclude;
+  }): Promise<void> {
+    const idle = input.clients.filter((row) => row.sent <= 0);
+    if (!idle.length) return;
+
+    const idleKeys = new Set(idle.map((row) => clientGroupKey(row)));
+    const activeByClient = new Map<string, SmartleadCampaign[]>();
+    for (const campaign of input.campaigns) {
+      if (isNoiseCampaign(campaign.name)) continue;
+      if (isPulseExcludedCampaign(campaign, input.pulseExclude)) continue;
+      if (String(campaign.status ?? "").toUpperCase() !== "ACTIVE") continue;
+      const resolved = resolveClient(
+        campaign,
+        input.clientsById,
+        input.supabaseCampaigns,
+        input.registry,
+      );
+      const key = clientGroupKey(resolved);
+      if (!idleKeys.has(key)) continue;
+      const list = activeByClient.get(key) ?? [];
+      list.push(campaign);
+      activeByClient.set(key, list);
+    }
+
+    for (const client of idle) {
+      const campaigns = activeByClient.get(clientGroupKey(client)) ?? [];
+      if (!campaigns.length) continue;
+      const samples: Array<{ remaining: number | null; staffable: number | null }> = [];
+      for (const campaign of campaigns) {
+        const analytics = await this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null);
+        const remaining = parseCampaignLeadStats(analytics)?.remaining ?? null;
+        let staffable: number | null = null;
+        if (remaining == null || remaining >= 10) {
+          const accounts = await this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []);
+          staffable = classifyInboxes(
+            accounts.map((row) => ({
+              id: row.id,
+              email: row.from_email ?? row.email ?? row.username,
+              smtpOk: row.is_smtp_success !== false,
+              imapOk: row.is_imap_success !== false,
+              dailySent: row.daily_sent_count ?? 0,
+            })),
+          ).staffable;
+        }
+        samples.push({ remaining, staffable });
+        await sleep(80);
+      }
+      const shortfall = classifyClientPulseShortfall(samples);
+      if (shortfall) client.shortfall = shortfall;
+    }
   }
 
   private async inspectCampaign(input: {

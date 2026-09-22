@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  classifyClientPulseShortfall,
+  classifyPulseShortfall,
   formatClientPulse,
   isPulseExcludedCampaign,
   isPulseWindow,
@@ -59,12 +61,19 @@ describe("client pulse", () => {
     assert.doesNotMatch(text, /Paused/);
   });
 
-  it("names every paused campaign on the 2-hour pulse", () => {
+  it("counts paused campaigns without naming them", () => {
     const text = formatClientPulse({
       day: "2026-08-27",
       hour: 10,
       bounceWarn: 5,
-      clients: [{ clientName: "Bolder Cyber Partners", sent: 0, bounced: 0 }],
+      clients: [
+        {
+          clientName: "Bolder Cyber Partners",
+          sent: 0,
+          bounced: 0,
+          shortfall: "too few leads",
+        },
+      ],
       paused: [
         {
           clientName: "Bolder Cyber Partners",
@@ -85,11 +94,36 @@ describe("client pulse", () => {
       ],
     });
     assert.match(text, /Thu 8\/27 10:00am — sent today/);
-    assert.match(text, /\*Paused\* \(3\)/);
-    assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
-    assert.match(text, /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(With Team\)/);
-    assert.match(text, /• \*Vasco Warranty\* — Signal - Warranty Admin Hiring/);
+    assert.match(text, /\*Bolder Cyber Partners\* — 0 sent · too few leads/);
+    assert.match(text, /Paused: 3/);
+    assert.doesNotMatch(text, /\*Paused\*/);
+    assert.doesNotMatch(text, /• /);
+    assert.doesNotMatch(text, /Generic \(No Team\)/);
+    assert.doesNotMatch(text, /Healthcare Under-1k/);
+    assert.doesNotMatch(text, /Warranty Admin Hiring/);
     assert.doesNotMatch(text, /Canary/i);
+  });
+
+  it("classifies 0-send shortfalls as too few leads vs too few senders", () => {
+    assert.equal(classifyPulseShortfall({ remaining: 0, staffable: 8 }), "too few leads");
+    assert.equal(classifyPulseShortfall({ remaining: 4, staffable: 12 }), "too few leads");
+    assert.equal(classifyPulseShortfall({ remaining: 400, staffable: 1 }), "too few senders");
+    assert.equal(classifyPulseShortfall({ remaining: 400, staffable: 0 }), "too few senders");
+    assert.equal(classifyPulseShortfall({ remaining: 400, staffable: 8 }), null);
+    assert.equal(
+      classifyClientPulseShortfall([
+        { remaining: 0, staffable: null },
+        { remaining: 500, staffable: 0 },
+      ]),
+      "too few senders",
+    );
+    assert.equal(
+      classifyClientPulseShortfall([
+        { remaining: 0, staffable: null },
+        { remaining: 3, staffable: null },
+      ]),
+      "too few leads",
+    );
   });
 
   it("keeps every still-paused campaign, including Generic and other clients", () => {
@@ -163,7 +197,7 @@ describe("client pulse", () => {
     assert.equal(rolled[0].clientName, "Bolder Cyber Partners");
   });
 
-  it("omits excluded leftovers from the Slack Paused list but keeps other paused campaigns", () => {
+  it("omits excluded leftovers from the Slack Paused count", () => {
     const text = formatClientPulse({
       day: "2026-08-27",
       hour: 10,
@@ -179,11 +213,12 @@ describe("client pulse", () => {
         },
       ],
     });
-    assert.match(text, /\*Paused\* \(1\)/);
-    assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\)/);
+    assert.match(text, /Paused: 1/);
+    assert.doesNotMatch(text, /Generic \(No Team\)/);
     assert.doesNotMatch(text, /Unknown client/);
     assert.doesNotMatch(text, /Nieto Spring/);
     assert.doesNotMatch(text, /Positive/);
+    assert.doesNotMatch(text, /• /);
   });
 
   it("reads today's sent and bounce from analytics-by-date", () => {
