@@ -108,7 +108,11 @@ export function formatDailyDigest(
     `*${formatDayLabel(day)}*`,
     `*${totals.sent.toLocaleString()} sent today* (${totals.firstTouch.toLocaleString()} new · ${totals.followUp.toLocaleString()} follow-up)${bounceSuffix(totals.sent, totals.bounced, bounceWarn)}`,
     `Still waiting: ${totals.waitingNew.toLocaleString()} new · ${totals.waitingFollowUp.toLocaleString()} follow-up`,
-    `Paused: ${formatNameList(totals.paused)}`,
+    `Paused: ${
+      totals.paused.length
+        ? `${totals.paused.length} (new pauses still alert via 15m watch)`
+        : "none"
+    }`,
     `Finished today: ${formatNameList(totals.finishedToday, 6)}`,
   ];
 
@@ -126,10 +130,16 @@ export function formatDailyDigest(
       rows,
       sent: rows.reduce((sum, row) => sum + row.sent, 0),
       bounced: rows.reduce((sum, row) => sum + row.bounced, 0),
-      leftover: rows.reduce((sum, row) => sum + row.remaining, 0),
-      paused: rows.some((row) => String(row.status ?? "").toUpperCase() === "PAUSED"),
     }))
-    .filter((client) => client.sent > 0 || client.leftover >= 10 || client.paused)
+    .filter(
+      (client) =>
+        client.sent > 0 ||
+        client.rows.some(
+          (row) =>
+            String(row.status ?? "ACTIVE").toUpperCase() !== "PAUSED" &&
+            row.remaining >= 10,
+        ),
+    )
     .sort((a, b) => b.sent - a.sent || a.clientName.localeCompare(b.clientName));
 
   for (const client of clients) {
@@ -140,12 +150,11 @@ export function formatDailyDigest(
       `*${client.clientName}* — ${formatClientVolume(client.sent, firstTouch, followUp)}${bounceSuffix(client.sent, client.bounced, bounceWarn)}`,
     );
     const campaignsToShow = [...client.rows]
-      .filter(
-        (row) =>
-          row.sent > 0 ||
-          row.remaining >= 10 ||
-          String(row.status ?? "").toUpperCase() === "PAUSED",
-      )
+      .filter((row) => {
+        const paused = String(row.status ?? "").toUpperCase() === "PAUSED";
+        if (paused && row.sent <= 0) return false;
+        return row.sent > 0 || row.remaining >= 10 || paused;
+      })
       .sort((a, b) => {
         const pausedA = String(a.status ?? "").toUpperCase() === "PAUSED" ? 0 : 1;
         const pausedB = String(b.status ?? "").toUpperCase() === "PAUSED" ? 0 : 1;

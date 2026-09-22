@@ -1,23 +1,35 @@
 import { clientGroupKey } from "./clients.js";
-import { isNoiseCampaign } from "./names.js";
+import { isNoiseCampaign, shortCampaignName } from "./names.js";
 import { pickNumber, pickString, unwrap } from "./parse.js";
 import { hourInZone, minutesInZone, weekdayInZone, ymdInZone } from "./time.js";
 
-export type PulseShortfall = "too few senders" | "too few leads";
+export type PulseShortfall = "too few senders" | "too few leads" | "smtp_down" | "not_sending";
 
 export interface ClientPulse {
   clientId?: number | null;
   clientName: string;
   sent: number;
   bounced: number;
-  shortfall?: PulseShortfall;
 }
 
-/** First pulse slot where a 0-send client is worth diagnosing (window is usually 9am). */
+export interface OffTrackPulseRow {
+  clientName: string;
+  campaignName: string;
+  campaignId?: number;
+  reason: string;
+  kind?: PulseShortfall;
+}
+
+/** First pulse slot where a 0-send ACTIVE camp is worth diagnosing (window is usually 9am). */
 export const PULSE_SHORTFALL_AFTER_HOUR = 10;
 
+/** Deliverability CANON floor — exclusive senders on an ACTIVE list. */
+export const CANON_MIN_SENDERS = 40;
+
+export const DEFAULT_PULSE_WEEKDAYS = [1, 2, 3, 4, 5];
+
 const LOW_LEAD_REMAINING = 10;
-const LOW_SENDER_STAFFABLE = 1;
+const OFF_TRACK_SENT_MAX = 2;
 
 export interface PausedPulseRow {
   clientName: string;
@@ -191,7 +203,7 @@ export function isPulseWindow(
   now: Date,
   timeZone: string,
   hours: number[],
-  weekdays: number[] = [1, 2, 3, 4],
+  weekdays: number[] = DEFAULT_PULSE_WEEKDAYS,
 ): boolean {
   if (!weekdays.includes(weekdayInZone(now, timeZone))) return false;
   return hours.includes(hourInZone(now, timeZone));
@@ -206,7 +218,7 @@ export function resolvePulseSlot(
   now: Date,
   timeZone: string,
   hours: number[],
-  weekdays: number[] = [1, 2, 3, 4],
+  weekdays: number[] = DEFAULT_PULSE_WEEKDAYS,
   graceMinutes = PULSE_GRACE_MINUTES,
 ): { day: string; hour: number; slot: string } | null {
   if (!weekdays.includes(weekdayInZone(now, timeZone))) return null;
@@ -224,35 +236,113 @@ export function resolvePulseSlot(
   return { day, hour: prior, slot: pulseSlot(day, prior) };
 }
 
+export function visiblePausedRows(
+  paused: PausedPulseRow[],
+  exclude?: PulseExclude,
+): PausedPulseRow[] {
+  return paused.filter(
+    (row) =>
+      !isNoiseCampaign(row.campaignName) &&
+      !isPulseExcludedCampaign(
+        { id: row.campaignId, name: row.campaignName },
+        exclude,
+      ),
+  );
+}
+
+/** Pauses whose last-seen timestamp falls on this calendar day in `timeZone`. */
+export function pausedSeenOnDay(
+  paused: PausedPulseRow[],
+  seenAt: Map<number, string | undefined>,
+  day: string,
+  timeZone: string,
+): PausedPulseRow[] {
+  return paused.filter((row) => {
+    if (row.campaignId == null) return false;
+    const raw = seenAt.get(row.campaignId);
+    if (!raw) return false;
+    const at = new Date(raw);
+    return !Number.isNaN(at.getTime()) && ymdInZone(at, timeZone) === day;
+  });
+}
+
 export function classifyPulseShortfall(input: {
   remaining: number | null;
   staffable: number | null;
+  notStarted?: number | null;
+  attached?: number | null;
+  disconnected?: number | null;
+  sent?: number;
 }): PulseShortfall | null {
-  const lowLeads = input.remaining != null && input.remaining < LOW_LEAD_REMAINING;
-  const lowSenders = input.staffable != null && input.staffable <= LOW_SENDER_STAFFABLE;
-  if (lowLeads && lowSenders) {
-    if (input.staffable === 0 && (input.remaining ?? 0) > 0) return "too few senders";
-    return "too few leads";
+  return classifyPulseOffTrack(input)?.kind ?? null;
+}
+
+/**
+ * ACTIVE 0-send (or near-0) diagnosis for the pulse Off-track section.
+ * Priority: thin hopper → SMTP/IMAP down → below CANON min-40 → dry new leads → stall.
+ */
+export function classifyPulseOffTrack(input: {
+  sent?: number;
+  remaining: number | null;
+  notStarted?: number | null;
+  staffable: number | null;
+  attached?: number | null;
+  disconnected?: number | null;
+}): { kind: PulseShortfall; reason: string } | null {
+  const sent = Math.max(0, input.sent ?? 0);
+  if (sent > OFF_TRACK_SENT_MAX) return null;
+
+  const remaining = input.remaining;
+  const notStarted = input.notStarted ?? null;
+  const staffable = input.staffable ?? 0;
+  const attached = input.attached ?? staffable;
+  const disconnected = input.disconnected ?? Math.max(0, attached - staffable);
+  const thin = remaining != null && remaining < LOW_LEAD_REMAINING;
+  const dryNew = notStarted != null && notStarted <= 0;
+  const smtpDown =
+    attached >= 5 &&
+    disconnected > 0 &&
+    staffable <= Math.max(1, Math.floor(attached * 0.3));
+  const belowCanon = input.staffable != null && staffable < CANON_MIN_SENDERS;
+
+  if (thin) {
+    return {
+      kind: "too few leads",
+      reason: formatLeadsReason(notStarted, remaining),
+    };
   }
-  if (lowLeads) return "too few leads";
-  if (lowSenders) return "too few senders";
+  if (smtpDown) {
+    return {
+      kind: "smtp_down",
+      reason: `${disconnected} of ${attached} attached SMTP/IMAP down`,
+    };
+  }
+  if (belowCanon) {
+    return {
+      kind: "too few senders",
+      reason: `too few senders (${staffable}/${attached} vs CANON min-40)`,
+    };
+  }
+  if (dryNew) {
+    return {
+      kind: "too few leads",
+      reason: formatLeadsReason(notStarted, remaining),
+    };
+  }
+  if (remaining != null && remaining >= LOW_LEAD_REMAINING && staffable >= 3) {
+    return {
+      kind: "not_sending",
+      reason: `not sending (${sent} sent, ${remaining.toLocaleString()} left)`,
+    };
+  }
   return null;
 }
 
-/** Client-level: prefer "too few senders" when any active list still has leads. */
-export function classifyClientPulseShortfall(
-  campaigns: Array<{ remaining: number | null; staffable: number | null }>,
-): PulseShortfall | null {
-  if (!campaigns.length) return null;
-  const reasons = campaigns.map(classifyPulseShortfall);
-  const hasLeads = campaigns.some((row) => (row.remaining ?? 0) >= LOW_LEAD_REMAINING);
-  if (hasLeads && reasons.includes("too few senders")) return "too few senders";
-  if (reasons.includes("too few leads") && !reasons.includes("too few senders")) {
-    return "too few leads";
-  }
-  if (reasons.includes("too few senders")) return "too few senders";
-  if (reasons.includes("too few leads")) return "too few leads";
-  return null;
+function formatLeadsReason(notStarted: number | null, remaining: number | null): string {
+  const parts: string[] = [];
+  if (notStarted != null) parts.push(`notStarted=${notStarted}`);
+  if (remaining != null) parts.push(`remaining=${remaining.toLocaleString()}`);
+  return parts.length ? `too few leads (${parts.join(", ")})` : "too few leads";
 }
 
 export function formatClientPulse(input: {
@@ -261,6 +351,8 @@ export function formatClientPulse(input: {
   clients: ClientPulse[];
   bounceWarn: number;
   paused?: PausedPulseRow[];
+  pausedToday?: PausedPulseRow[];
+  offTrack?: OffTrackPulseRow[];
   exclude?: PulseExclude;
 }): string {
   const totalSent = input.clients.reduce((sum, row) => sum + row.sent, 0);
@@ -274,23 +366,54 @@ export function formatClientPulse(input: {
     `Total ${totalSent.toLocaleString()} sent` +
       (overall != null ? ` · ${formatPct(overall)} bounce` : ""),
   );
-  const pausedCount = [...(input.paused ?? [])].filter(
-    (row) =>
-      !isNoiseCampaign(row.campaignName) &&
-      !isPulseExcludedCampaign(
-        { id: row.campaignId, name: row.campaignName },
-        input.exclude,
-      ),
-  ).length;
-  if (pausedCount) {
-    lines.push(`Paused: ${pausedCount}`);
+  const paused = visiblePausedRows(input.paused ?? [], input.exclude);
+  if (paused.length) {
+    lines.push(`Paused: ${paused.length} (new pauses still alert via 15m watch)`);
+    const fresh = visiblePausedRows(input.pausedToday ?? [], input.exclude).sort(
+      (a, b) =>
+        a.clientName.localeCompare(b.clientName) ||
+        a.campaignName.localeCompare(b.campaignName),
+    );
+    for (const row of fresh) {
+      lines.push(`• *${row.clientName}* — ${formatPulseCampaign(row)} (today)`);
+    }
+  }
+  const offTrack = [...(input.offTrack ?? [])]
+    .filter(
+      (row) =>
+        !isNoiseCampaign(row.campaignName) &&
+        !isPulseExcludedCampaign(
+          { id: row.campaignId, name: row.campaignName },
+          input.exclude,
+        ),
+    )
+    .sort(
+      (a, b) =>
+        a.clientName.localeCompare(b.clientName) ||
+        a.campaignName.localeCompare(b.campaignName),
+    );
+  if (offTrack.length) {
+    lines.push("");
+    lines.push("*Off track*");
+    for (const row of offTrack) {
+      lines.push(`• *${row.clientName}* — ${formatPulseCampaign(row)} — ${row.reason}`);
+    }
   }
   return lines.join("\n");
 }
 
+function formatPulseCampaign(row: {
+  clientName: string;
+  campaignName: string;
+  campaignId?: number;
+}): string {
+  const name = shortCampaignName(row.clientName, row.campaignName);
+  return row.campaignId != null ? `${name} \`#${row.campaignId}\`` : name;
+}
+
 function formatClientLine(row: ClientPulse, bounceWarn: number): string {
   if (row.sent <= 0) {
-    return row.shortfall ? `0 sent · ${row.shortfall}` : "0 sent";
+    return "0 sent";
   }
   const pct = bouncePercent(row.sent, row.bounced);
   if (pct == null) return `${row.sent.toLocaleString()} sent`;

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  classifyClientPulseShortfall,
+  classifyPulseOffTrack,
   classifyPulseShortfall,
   formatClientPulse,
   isPulseExcludedCampaign,
   isPulseWindow,
   parseTodayVolume,
+  pausedSeenOnDay,
   pulseSlot,
   resolvePulseSlot,
   rollupClientPulse,
@@ -66,14 +67,7 @@ describe("client pulse", () => {
       day: "2026-08-27",
       hour: 10,
       bounceWarn: 5,
-      clients: [
-        {
-          clientName: "Bolder Cyber Partners",
-          sent: 0,
-          bounced: 0,
-          shortfall: "too few leads",
-        },
-      ],
+      clients: [{ clientName: "Bolder Cyber Partners", sent: 0, bounced: 0 }],
       paused: [
         {
           clientName: "Bolder Cyber Partners",
@@ -94,8 +88,8 @@ describe("client pulse", () => {
       ],
     });
     assert.match(text, /Thu 8\/27 10:00am — sent today/);
-    assert.match(text, /\*Bolder Cyber Partners\* — 0 sent · too few leads/);
-    assert.match(text, /Paused: 3/);
+    assert.match(text, /\*Bolder Cyber Partners\* — 0 sent$/m);
+    assert.match(text, /Paused: 3 \(new pauses still alert via 15m watch\)/);
     assert.doesNotMatch(text, /\*Paused\*/);
     assert.doesNotMatch(text, /• /);
     assert.doesNotMatch(text, /Generic \(No Team\)/);
@@ -104,25 +98,151 @@ describe("client pulse", () => {
     assert.doesNotMatch(text, /Canary/i);
   });
 
-  it("classifies 0-send shortfalls as too few leads vs too few senders", () => {
+  it("lists only pauses newly seen this Chicago day", () => {
+    const paused = [
+      {
+        clientName: "Bolder Cyber Partners",
+        campaignName: "BCP Healthcare Under-1k (With Team)",
+        campaignId: 3763799,
+      },
+      {
+        clientName: "Vasco Warranty",
+        campaignName: "Vasco - Signal - Warranty Admin Hiring",
+        campaignId: 50,
+      },
+    ];
+    const today = pausedSeenOnDay(
+      paused,
+      new Map([[3763799, "2026-08-27T15:10:00.000Z"]]),
+      "2026-08-27",
+      "America/Chicago",
+    );
+    assert.deepEqual(
+      today.map((row) => row.campaignId),
+      [3763799],
+    );
+    const text = formatClientPulse({
+      day: "2026-08-27",
+      hour: 10,
+      bounceWarn: 5,
+      clients: [{ clientName: "Bolder Cyber Partners", sent: 12, bounced: 0 }],
+      paused,
+      pausedToday: today,
+    });
+    assert.match(text, /Paused: 2 \(new pauses still alert via 15m watch\)/);
+    assert.match(text, /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(With Team\) `#3763799` \(today\)/);
+    assert.doesNotMatch(text, /Warranty Admin Hiring/);
+  });
+
+  it("formats Off track lines with client, campaign, id, and reason", () => {
+    const text = formatClientPulse({
+      day: "2026-08-27",
+      hour: 10,
+      bounceWarn: 5,
+      clients: [
+        { clientName: "SalesGlider", sent: 11, bounced: 0 },
+        { clientName: "Goliath Cybersecurity", sent: 0, bounced: 0 },
+      ],
+      offTrack: [
+        {
+          clientName: "SalesGlider",
+          campaignName: "SalesGlider Nurture",
+          campaignId: 3122546,
+          reason: "too few leads (notStarted=0, remaining=12)",
+        },
+        {
+          clientName: "Goliath Cybersecurity",
+          campaignName: "Goliath L4 Education Tickets",
+          campaignId: 456,
+          reason: "too few senders (8/10 vs CANON min-40)",
+        },
+        {
+          clientName: "Parlay Tech",
+          campaignName: "Parlay Sports",
+          campaignId: 789,
+          reason: "18 of 20 attached SMTP/IMAP down",
+        },
+        {
+          clientName: "Bolder Cyber Partners",
+          campaignName: "Canary shell: #1 BCP Generic (With Team)",
+          campaignId: 1,
+          reason: "too few senders (0/0 vs CANON min-40)",
+        },
+      ],
+    });
+    assert.match(text, /\*SalesGlider\* — 11 sent · 0\.0% bounce/);
+    assert.doesNotMatch(text, /11 sent · too few/);
+    assert.match(text, /\*Off track\*/);
+    assert.match(
+      text,
+      /• \*SalesGlider\* — Nurture `#3122546` — too few leads \(notStarted=0, remaining=12\)/,
+    );
+    assert.match(
+      text,
+      /• \*Goliath Cybersecurity\* — L4 Education Tickets `#456` — too few senders \(8\/10 vs CANON min-40\)/,
+    );
+    assert.match(text, /• \*Parlay Tech\* — Sports `#789` — 18 of 20 attached SMTP\/IMAP down/);
+    assert.doesNotMatch(text, /Canary/i);
+  });
+
+  it("classifies 0-send off-track as senders vs leads vs SMTP", () => {
     assert.equal(classifyPulseShortfall({ remaining: 0, staffable: 8 }), "too few leads");
     assert.equal(classifyPulseShortfall({ remaining: 4, staffable: 12 }), "too few leads");
     assert.equal(classifyPulseShortfall({ remaining: 400, staffable: 1 }), "too few senders");
     assert.equal(classifyPulseShortfall({ remaining: 400, staffable: 0 }), "too few senders");
-    assert.equal(classifyPulseShortfall({ remaining: 400, staffable: 8 }), null);
     assert.equal(
-      classifyClientPulseShortfall([
-        { remaining: 0, staffable: null },
-        { remaining: 500, staffable: 0 },
-      ]),
+      classifyPulseShortfall({ remaining: 400, staffable: 8, attached: 10 }),
       "too few senders",
     );
     assert.equal(
-      classifyClientPulseShortfall([
-        { remaining: 0, staffable: null },
-        { remaining: 3, staffable: null },
-      ]),
-      "too few leads",
+      classifyPulseShortfall({
+        remaining: 400,
+        notStarted: 200,
+        staffable: 45,
+        attached: 45,
+      }),
+      "not_sending",
+    );
+    assert.equal(
+      classifyPulseOffTrack({
+        sent: 0,
+        remaining: 12,
+        notStarted: 0,
+        staffable: 46,
+        attached: 46,
+      })?.reason,
+      "too few leads (notStarted=0, remaining=12)",
+    );
+    assert.equal(
+      classifyPulseOffTrack({
+        sent: 0,
+        remaining: 400,
+        notStarted: 200,
+        staffable: 8,
+        attached: 10,
+      })?.reason,
+      "too few senders (8/10 vs CANON min-40)",
+    );
+    assert.equal(
+      classifyPulseOffTrack({
+        sent: 0,
+        remaining: 400,
+        notStarted: 200,
+        staffable: 2,
+        attached: 20,
+        disconnected: 18,
+      })?.reason,
+      "18 of 20 attached SMTP/IMAP down",
+    );
+    assert.equal(
+      classifyPulseOffTrack({
+        sent: 80,
+        remaining: 400,
+        notStarted: 0,
+        staffable: 8,
+        attached: 10,
+      }),
+      null,
     );
   });
 
@@ -213,7 +333,7 @@ describe("client pulse", () => {
         },
       ],
     });
-    assert.match(text, /Paused: 1/);
+    assert.match(text, /Paused: 1 \(new pauses still alert via 15m watch\)/);
     assert.doesNotMatch(text, /Generic \(No Team\)/);
     assert.doesNotMatch(text, /Unknown client/);
     assert.doesNotMatch(text, /Nieto Spring/);
@@ -269,9 +389,9 @@ describe("client pulse", () => {
     assert.deepEqual(parseTodayVolume({ data: [] }, "2026-09-01"), { sent: 0, bounced: 0 });
   });
 
-  it("only fires 8am–4pm ET Monday–Thursday, not the 5pm wrap-up hour", () => {
+  it("only fires 8am–4pm ET Monday–Friday, not the 5pm wrap-up hour", () => {
     const hours = [8, 10, 12, 14, 16];
-    const days = [1, 2, 3, 4];
+    const days = [1, 2, 3, 4, 5];
     // Thu 8/27 2:00pm ET
     assert.equal(
       isPulseWindow(new Date("2026-08-27T18:00:00.000Z"), "America/New_York", hours, days),
@@ -300,7 +420,7 @@ describe("client pulse", () => {
     // Fri 8/28 2:00pm ET
     assert.equal(
       isPulseWindow(new Date("2026-08-28T18:00:00.000Z"), "America/New_York", hours, days),
-      false,
+      true,
     );
     // Sat 8/22 2:00pm ET
     assert.equal(
@@ -317,7 +437,7 @@ describe("client pulse", () => {
 
   it("still posts a queued pulse after the hour when the watch ran long", () => {
     const hours = [8, 10, 12, 14, 16];
-    const days = [1, 2, 3, 4];
+    const days = [1, 2, 3, 4, 5];
     const zone = "America/Chicago";
     // Tue 9/1 10:05am CT — on the slot
     assert.deepEqual(
