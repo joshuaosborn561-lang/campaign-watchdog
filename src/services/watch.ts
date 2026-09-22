@@ -37,19 +37,19 @@ import {
 } from "../lib/schedule.js";
 import { diagnoseSending } from "../lib/sending.js";
 import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
-import { clientGroupKey, resolveClient } from "../lib/clients.js";
+import { resolveClient } from "../lib/clients.js";
 import {
-  classifyClientPulseShortfall,
+  classifyPulseOffTrack,
   formatClientPulse,
   isPulseExcludedCampaign,
   parseTodayVolume,
+  pausedSeenOnDay,
   PULSE_SHORTFALL_AFTER_HOUR,
   resolvePulseSlot,
   rollupClientPulse,
   stillPausedCampaigns,
-  type ClientPulse,
+  type OffTrackPulseRow,
   type PausedPulseRow,
-  type PulseExclude,
 } from "../lib/pulse.js";
 import { unwrap } from "../lib/parse.js";
 import {
@@ -249,6 +249,11 @@ export class WatchService {
         campaignId: campaign.id,
       };
     });
+    const idleActive: Array<{
+      campaign: SmartleadCampaign;
+      clientName: string;
+      sent: number;
+    }> = [];
 
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
@@ -265,6 +270,13 @@ export class WatchService {
           sent: volume.sent,
           bounced: volume.bounced,
         });
+        if (status === "ACTIVE" && volume.sent <= 2) {
+          idleActive.push({
+            campaign,
+            clientName: resolvedClient.clientName,
+            sent: volume.sent,
+          });
+        }
       } catch (error) {
         console.warn(
           `[watchdog] pulse #${campaign.id} ${campaign.name}:`,
@@ -277,16 +289,22 @@ export class WatchService {
     const rolled = rollupClientPulse(rows);
     if (!rolled.length && !paused.length) return { posted: false, clients: 0, paused: 0 };
 
-    if (hour >= PULSE_SHORTFALL_AFTER_HOUR) {
-      await this.attachPulseShortfalls({
-        clients: rolled,
-        campaigns,
-        clientsById,
-        supabaseCampaigns,
-        registry,
-        pulseExclude,
-      });
-    }
+    const offTrack =
+      hour >= PULSE_SHORTFALL_AFTER_HOUR
+        ? await this.collectPulseOffTrack(idleActive)
+        : [];
+    const pausedToday = pausedSeenOnDay(
+      paused,
+      new Map(
+        paused.flatMap((row) =>
+          row.campaignId != null
+            ? [[row.campaignId, this.state.snapshot(row.campaignId).lastAutobounceAlertAt] as const]
+            : [],
+        ),
+      ),
+      day,
+      timeZone,
+    );
 
     await this.notify(
       formatClientPulse({
@@ -295,6 +313,8 @@ export class WatchService {
         clients: rolled,
         bounceWarn: this.config.bounceAutoPauseThreshold,
         paused,
+        pausedToday,
+        offTrack,
         exclude: pulseExclude,
       }),
       {
@@ -303,7 +323,7 @@ export class WatchService {
         clientName: "All clients",
         campaignName: `Client pulse ${slot}`,
         kind: "pulse",
-        payload: { day, hour, clients: rolled, paused },
+        payload: { day, hour, clients: rolled, paused, offTrack },
       },
     );
     this.state.setLastPulseSlot(slot);
@@ -311,63 +331,44 @@ export class WatchService {
     return { posted: true, clients: rolled.length, paused: paused.length };
   }
 
-  /** Diagnose 0-send clients that still have an ACTIVE list (leads vs senders). */
-  private async attachPulseShortfalls(input: {
-    clients: ClientPulse[];
-    campaigns: SmartleadCampaign[];
-    clientsById: Map<number, SmartleadClientRecord>;
-    supabaseCampaigns: Map<number, CampaignNameRow>;
-    registry: Map<number, string>;
-    pulseExclude: PulseExclude;
-  }): Promise<void> {
-    const idle = input.clients.filter((row) => row.sent <= 0);
-    if (!idle.length) return;
-
-    const idleKeys = new Set(idle.map((row) => clientGroupKey(row)));
-    const activeByClient = new Map<string, SmartleadCampaign[]>();
-    for (const campaign of input.campaigns) {
-      if (isNoiseCampaign(campaign.name)) continue;
-      if (isPulseExcludedCampaign(campaign, input.pulseExclude)) continue;
-      if (String(campaign.status ?? "").toUpperCase() !== "ACTIVE") continue;
-      const resolved = resolveClient(
-        campaign,
-        input.clientsById,
-        input.supabaseCampaigns,
-        input.registry,
+  /** Diagnose ACTIVE camps that are not tracking send volume (from 10am). */
+  private async collectPulseOffTrack(
+    idleActive: Array<{ campaign: SmartleadCampaign; clientName: string; sent: number }>,
+  ): Promise<OffTrackPulseRow[]> {
+    const offTrack: OffTrackPulseRow[] = [];
+    for (const row of idleActive) {
+      const analytics = await this.smartlead.getCampaignAnalytics(row.campaign.id).catch(() => null);
+      const stats = parseCampaignLeadStats(analytics);
+      const accounts = await this.smartlead.getCampaignEmailAccounts(row.campaign.id).catch(() => []);
+      const inboxes = classifyInboxes(
+        accounts.map((account) => ({
+          id: account.id,
+          email: account.from_email ?? account.email ?? account.username,
+          smtpOk: account.is_smtp_success !== false,
+          imapOk: account.is_imap_success !== false,
+          dailySent: account.daily_sent_count ?? 0,
+        })),
       );
-      const key = clientGroupKey(resolved);
-      if (!idleKeys.has(key)) continue;
-      const list = activeByClient.get(key) ?? [];
-      list.push(campaign);
-      activeByClient.set(key, list);
-    }
-
-    for (const client of idle) {
-      const campaigns = activeByClient.get(clientGroupKey(client)) ?? [];
-      if (!campaigns.length) continue;
-      const samples: Array<{ remaining: number | null; staffable: number | null }> = [];
-      for (const campaign of campaigns) {
-        const analytics = await this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null);
-        const remaining = parseCampaignLeadStats(analytics)?.remaining ?? null;
-        let staffable: number | null = null;
-        if (remaining == null || remaining >= 10) {
-          const accounts = await this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []);
-          staffable = classifyInboxes(
-            accounts.map((row) => ({
-              id: row.id,
-              email: row.from_email ?? row.email ?? row.username,
-              smtpOk: row.is_smtp_success !== false,
-              imapOk: row.is_imap_success !== false,
-              dailySent: row.daily_sent_count ?? 0,
-            })),
-          ).staffable;
-        }
-        samples.push({ remaining, staffable });
-        await sleep(80);
+      const miss = classifyPulseOffTrack({
+        sent: row.sent,
+        remaining: stats?.remaining ?? null,
+        notStarted: stats?.notStarted ?? null,
+        staffable: inboxes.staffable,
+        attached: inboxes.attached,
+        disconnected: inboxes.disconnected,
+      });
+      if (miss) {
+        offTrack.push({
+          clientName: row.clientName,
+          campaignName: row.campaign.name,
+          campaignId: row.campaign.id,
+          reason: miss.reason,
+          kind: miss.kind,
+        });
       }
-      const shortfall = classifyClientPulseShortfall(samples);
-      if (shortfall) client.shortfall = shortfall;
+      await sleep(80);
     }
+    return offTrack;
   }
 
   private async inspectCampaign(input: {

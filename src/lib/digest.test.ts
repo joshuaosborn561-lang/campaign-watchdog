@@ -226,15 +226,15 @@ describe("digest", () => {
     ]);
     assert.match(text ?? "", /Thu 8\/27/);
     assert.match(text ?? "", /\*85 sent today\* \(0 new · 85 follow-up\) · 2\.4% bounce/);
-    assert.match(text ?? "", /Paused: \*Vasco Warranty\* Signal - Warranty Admin Hiring/);
+    assert.match(text ?? "", /Paused: 1 \(new pauses still alert via 15m watch\)/);
+    assert.doesNotMatch(text ?? "", /Warranty Admin Hiring/);
     assert.match(text ?? "", /Finished today: \*Parlay Tech\* Old list/);
     assert.match(text ?? "", /\*Goliath Cybersecurity\* — 80 sent, all follow-up · 1\.3% bounce/);
     assert.match(text ?? "", /• Displacement L 501-1000 ITDir — 80 sent, all follow-up · 1\.3% bounce/);
-    assert.match(text ?? "", /• Signal - Warranty Admin Hiring — paused · 40 follow-ups waiting/);
     assert.match(text ?? "", /\*Parlay Tech\* — 5 sent, all follow-up · \*20\.0% bounce\*/);
   });
 
-  it("lists every still-paused campaign instead of truncating", () => {
+  it("scants the paused wall to a count instead of naming every hold", () => {
     const text = formatDailyDigest("2026-08-27", [
       row({
         clientName: "Bolder Cyber Partners",
@@ -281,15 +281,14 @@ describe("digest", () => {
         remaining: 12,
       }),
     ]);
-    assert.match(text ?? "", /Paused: /);
-    assert.match(text ?? "", /Generic \(With Team\)/);
-    assert.match(text ?? "", /Generic \(No Team\)/);
-    assert.match(text ?? "", /L1 Financial Services Tickets/);
-    assert.match(text ?? "", /Nurture/);
-    assert.match(text ?? "", /Law Firms/);
-    assert.match(text ?? "", /Trendrr Sales DM SEG Tickets/);
-    assert.match(text ?? "", /Ticket Offer Propert Manager/);
-    assert.doesNotMatch(text ?? "", /more/);
+    assert.match(text ?? "", /Paused: 7 \(new pauses still alert via 15m watch\)/);
+    assert.doesNotMatch(text ?? "", /Generic \(With Team\)/);
+    assert.doesNotMatch(text ?? "", /Generic \(No Team\)/);
+    assert.doesNotMatch(text ?? "", /L1 Financial Services Tickets/);
+    assert.doesNotMatch(text ?? "", /Nurture/);
+    assert.doesNotMatch(text ?? "", /Law Firms/);
+    assert.doesNotMatch(text ?? "", /Trendrr Sales DM SEG Tickets/);
+    assert.doesNotMatch(text ?? "", /Ticket Offer Propert Manager/);
   });
 
   it("omits canary shells from the digest", () => {
@@ -315,7 +314,8 @@ describe("digest", () => {
         remaining: 4,
       }),
     ]);
-    assert.match(text ?? "", /Paused: \*Bolder Cyber Partners\* Generic \(With Team\)/);
+    assert.match(text ?? "", /Paused: 1 \(new pauses still alert via 15m watch\)/);
+    assert.doesNotMatch(text ?? "", /Generic \(With Team\)/);
     assert.doesNotMatch(text ?? "", /Canary/i);
     assert.doesNotMatch(text ?? "", /12 sent/);
   });

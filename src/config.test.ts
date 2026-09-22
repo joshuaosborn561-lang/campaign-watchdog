@@ -16,9 +16,9 @@ describe("loadConfig", () => {
     assert.deepEqual(config.completionThresholds, [50, 75, 90, 100]);
     assert.equal(config.messagePerDay, 30);
     assert.equal(config.sendShortfallTimezone, "America/Chicago");
-    assert.equal(config.pulseCron, "5 8,10,12,14,16 * * 1-4");
+    assert.equal(config.pulseCron, "5 8,10,12,14,16 * * 1-5");
     assert.deepEqual(config.pulseHours, [8, 10, 12, 14, 16]);
-    assert.deepEqual(config.pulseWeekdays, [1, 2, 3, 4]);
+    assert.deepEqual(config.pulseWeekdays, [1, 2, 3, 4, 5]);
     assert.deepEqual(config.heyreachWorkspaces, []);
     assert.deepEqual(config.heyreachExcludeIds, [530529]);
     assert.equal(config.heyreachRunwayDays, 7);

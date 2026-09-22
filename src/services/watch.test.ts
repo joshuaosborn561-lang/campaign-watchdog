@@ -295,9 +295,36 @@ describe("WatchService attribution and flags", () => {
         const result = await watch.runPulse(firedAt);
         assert.equal(result.posted, true);
         assert.match(slack.posted[0] ?? "", /Tue 9\/1 10:00am — sent today/);
-        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent · too few senders/);
+        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent$/m);
+        assert.match(slack.posted[0] ?? "", /\*Off track\*/);
+        assert.match(
+          slack.posted[0] ?? "",
+          /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(No Team\) `#100` — too few senders \(1\/1 vs CANON min-40\)/,
+        );
         assert.doesNotMatch(slack.posted[0] ?? "", /5,328 sent/);
-        assert.doesNotMatch(slack.posted[0] ?? "", /Healthcare Under-1k/);
+      },
+    );
+  });
+
+  it("posts Friday 10am Chicago pulses", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+        ],
+        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+        analyticsByDate: {
+          100: { sent_count: 12, bounce_count: 0 },
+        },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-08-28T15:05:00.000Z"));
+        assert.equal(result.posted, true);
+        assert.match(slack.posted[0] ?? "", /Fri 8\/28 10:00am — sent today/);
+        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 12 sent/);
       },
     );
   });
@@ -360,8 +387,11 @@ describe("WatchService attribution and flags", () => {
       async (watch) => {
         const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
         assert.equal(result.posted, true);
-        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent · too few leads/);
-        assert.doesNotMatch(slack.posted[0] ?? "", /Healthcare Under-1k/);
+        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent$/m);
+        assert.match(
+          slack.posted[0] ?? "",
+          /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(No Team\) `#100` — too few leads \(notStarted=0, remaining=0\)/,
+        );
       },
     );
   });
@@ -403,13 +433,46 @@ describe("WatchService attribution and flags", () => {
         const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
         assert.equal(result.posted, true);
         const text = slack.posted[0] ?? "";
-        assert.match(text, /Paused: 1/);
+        assert.match(text, /Paused: 1 \(new pauses still alert via 15m watch\)/);
         assert.doesNotMatch(text, /\*Paused\*/);
         assert.doesNotMatch(text, /Generic \(No Team\)/);
         assert.doesNotMatch(text, /Unknown client/);
         assert.doesNotMatch(text, /Positive/);
         assert.doesNotMatch(text, /Propert Manager/);
         assert.doesNotMatch(text, /• /);
+      },
+    );
+  });
+
+  it("names a pause newly seen this Chicago day", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({
+            id: 12,
+            name: "BCP Generic (No Team)",
+            status: "PAUSED",
+            client_id: BCP,
+          }),
+        ],
+        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+        analyticsByDate: { 12: { sent_count: 0, bounce_count: 0 } },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch, state) => {
+        state.put(12, {
+          status: "PAUSED",
+          notifiedThresholds: [],
+          seen: true,
+          lastAutobounceAlertAt: "2026-09-01T15:12:00.000Z",
+        });
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.posted, true);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /Paused: 1 \(new pauses still alert via 15m watch\)/);
+        assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\) `#12` \(today\)/);
       },
     );
   });

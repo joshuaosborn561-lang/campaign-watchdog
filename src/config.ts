@@ -1,6 +1,7 @@
 import {
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
+  DEFAULT_PULSE_WEEKDAYS,
 } from "./lib/pulse.js";
 
 function required(name: string): string {
@@ -235,9 +236,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       bounceAutoPauseThreshold: optionalNumber("BOUNCE_AUTO_PAUSE_THRESHOLD", 5),
       minBounceSample: optionalNumber("MIN_BOUNCE_SAMPLE", 20),
       cron: optional("CRON", "*/15 * * * *"),
-      pulseCron: optional("PULSE_CRON", "5 8,10,12,14,16 * * 1-4"),
+      pulseCron: optional("PULSE_CRON", "5 8,10,12,14,16 * * 1-5"),
       pulseHours: csvNumbers("PULSE_HOURS", [8, 10, 12, 14, 16]),
-      pulseWeekdays: csvNumbers("PULSE_WEEKDAYS", [1, 2, 3, 4]),
+      pulseWeekdays: csvNumbers("PULSE_WEEKDAYS", DEFAULT_PULSE_WEEKDAYS),
       watchStatuses: csvStrings("WATCH_STATUSES", ["ACTIVE", "PAUSED"]),
       alertExistingAutobounce: optionalBool("ALERT_EXISTING_AUTOBOUNCE", false),
       port: optionalNumber("PORT", 3000),
