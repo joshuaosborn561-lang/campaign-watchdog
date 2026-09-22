@@ -1,14 +1,23 @@
 import { clientGroupKey } from "./clients.js";
-import { isNoiseCampaign, shortCampaignName } from "./names.js";
+import { isNoiseCampaign } from "./names.js";
 import { pickNumber, pickString, unwrap } from "./parse.js";
 import { hourInZone, minutesInZone, weekdayInZone, ymdInZone } from "./time.js";
+
+export type PulseShortfall = "too few senders" | "too few leads";
 
 export interface ClientPulse {
   clientId?: number | null;
   clientName: string;
   sent: number;
   bounced: number;
+  shortfall?: PulseShortfall;
 }
+
+/** First pulse slot where a 0-send client is worth diagnosing (window is usually 9am). */
+export const PULSE_SHORTFALL_AFTER_HOUR = 10;
+
+const LOW_LEAD_REMAINING = 10;
+const LOW_SENDER_STAFFABLE = 1;
 
 export interface PausedPulseRow {
   clientName: string;
@@ -215,6 +224,37 @@ export function resolvePulseSlot(
   return { day, hour: prior, slot: pulseSlot(day, prior) };
 }
 
+export function classifyPulseShortfall(input: {
+  remaining: number | null;
+  staffable: number | null;
+}): PulseShortfall | null {
+  const lowLeads = input.remaining != null && input.remaining < LOW_LEAD_REMAINING;
+  const lowSenders = input.staffable != null && input.staffable <= LOW_SENDER_STAFFABLE;
+  if (lowLeads && lowSenders) {
+    if (input.staffable === 0 && (input.remaining ?? 0) > 0) return "too few senders";
+    return "too few leads";
+  }
+  if (lowLeads) return "too few leads";
+  if (lowSenders) return "too few senders";
+  return null;
+}
+
+/** Client-level: prefer "too few senders" when any active list still has leads. */
+export function classifyClientPulseShortfall(
+  campaigns: Array<{ remaining: number | null; staffable: number | null }>,
+): PulseShortfall | null {
+  if (!campaigns.length) return null;
+  const reasons = campaigns.map(classifyPulseShortfall);
+  const hasLeads = campaigns.some((row) => (row.remaining ?? 0) >= LOW_LEAD_REMAINING);
+  if (hasLeads && reasons.includes("too few senders")) return "too few senders";
+  if (reasons.includes("too few leads") && !reasons.includes("too few senders")) {
+    return "too few leads";
+  }
+  if (reasons.includes("too few senders")) return "too few senders";
+  if (reasons.includes("too few leads")) return "too few leads";
+  return null;
+}
+
 export function formatClientPulse(input: {
   day: string;
   hour: number;
@@ -234,33 +274,24 @@ export function formatClientPulse(input: {
     `Total ${totalSent.toLocaleString()} sent` +
       (overall != null ? ` · ${formatPct(overall)} bounce` : ""),
   );
-  const paused = [...(input.paused ?? [])]
-    .filter((row) => !isNoiseCampaign(row.campaignName))
-    .filter(
-      (row) =>
-        !isPulseExcludedCampaign(
-          { id: row.campaignId, name: row.campaignName },
-          input.exclude,
-        ),
-    )
-    .sort(
-      (a, b) =>
-        a.clientName.localeCompare(b.clientName) ||
-        a.campaignName.localeCompare(b.campaignName),
-    );
-  if (paused.length) {
-    lines.push("");
-    lines.push(`*Paused* (${paused.length})`);
-    for (const row of paused) {
-      const campaign = shortCampaignName(row.clientName, row.campaignName);
-      lines.push(`• *${row.clientName}* — ${campaign}`);
-    }
+  const pausedCount = [...(input.paused ?? [])].filter(
+    (row) =>
+      !isNoiseCampaign(row.campaignName) &&
+      !isPulseExcludedCampaign(
+        { id: row.campaignId, name: row.campaignName },
+        input.exclude,
+      ),
+  ).length;
+  if (pausedCount) {
+    lines.push(`Paused: ${pausedCount}`);
   }
   return lines.join("\n");
 }
 
 function formatClientLine(row: ClientPulse, bounceWarn: number): string {
-  if (row.sent <= 0) return "0 sent";
+  if (row.sent <= 0) {
+    return row.shortfall ? `0 sent · ${row.shortfall}` : "0 sent";
+  }
   const pct = bouncePercent(row.sent, row.bounced);
   if (pct == null) return `${row.sent.toLocaleString()} sent`;
   const label = `${formatPct(pct)} bounce`;
