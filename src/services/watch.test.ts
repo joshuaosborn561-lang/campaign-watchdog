@@ -28,13 +28,17 @@ function fakeSmartlead(options: {
   analyticsByDate?: Record<number, unknown>;
   analytics?: Record<number, unknown>;
   detail?: Record<number, unknown>;
-  emailAccounts?: Record<number, Array<{
-    id: number;
-    from_email?: string;
-    is_smtp_success?: boolean;
-    is_imap_success?: boolean;
-    daily_sent_count?: number;
-  }>>;
+  settings?: Record<number, unknown>;
+  emailAccounts?: Record<
+    number,
+    Array<{
+      id: number;
+      from_email?: string;
+      is_smtp_success?: boolean;
+      is_imap_success?: boolean;
+      daily_sent_count?: number;
+    }>
+  >;
 }) {
   const defaultInbox = [
     { id: 1, from_email: "a@x.com", is_smtp_success: true, is_imap_success: true, daily_sent_count: 0 },
@@ -43,14 +47,15 @@ function fakeSmartlead(options: {
     listCampaigns: async () => options.campaigns,
     listClients: async () => options.clients ?? [],
     getCampaign: async (id: number) => options.detail?.[id] ?? options.campaigns.find((row) => row.id === id),
-    getCampaignSettings: async () => ({
-      scheduler_cron_value: {
-        tz: "America/Chicago",
-        days: [1, 2, 3, 4],
-        startHour: "09:00",
-        endHour: "17:00",
+    getCampaignSettings: async (id: number) =>
+      options.settings?.[id] ?? {
+        scheduler_cron_value: {
+          tz: "America/Chicago",
+          days: [1, 2, 3, 4, 5],
+          startHour: "09:00",
+          endHour: "18:00",
+        },
       },
-    }),
     getCampaignAnalytics: async (id: number) => options.analytics?.[id] ?? null,
     getCampaignStatistics: async () => null,
     getCampaignAnalyticsByDate: async (id: number) => {
@@ -150,18 +155,10 @@ async function withService(
   }
 }
 
-const lifetimeBcpUnder = {
-  total_count: "5328",
-  sent_count: "5328",
-  unique_sent_count: "5328",
-  campaign_lead_stats: { total: 5328, notStarted: 0, inprogress: 5328 },
-};
-const lifetimeBcpOver = {
-  total_count: "620",
-  sent_count: "620",
-  unique_sent_count: "620",
-  campaign_lead_stats: { total: 620, notStarted: 0, inprogress: 620 },
-};
+const noonTue = new Date("2026-09-01T17:10:00.000Z"); // 12:10pm CT
+const eodTue = new Date("2026-09-01T22:30:00.000Z"); // 5:30pm CT
+const noonSat = new Date("2026-09-05T17:10:00.000Z");
+const weekdayAfternoon = new Date("2026-09-01T16:10:00.000Z");
 
 describe("resolveClientName", () => {
   it("prefers Smartlead client_id over a stale campaignintelligence name", () => {
@@ -195,47 +192,95 @@ describe("resolveClientName", () => {
   });
 });
 
-describe("WatchService attribution and flags", () => {
-  it("digest/pulse BCP totals stay 0 when today is 0 and lifetime sent is large", async () => {
+describe("WatchService Slack — midday / autobounce / EOD only", () => {
+  it("posts a compact midday line per active client and flags under 1,080 projected", async () => {
     const slack = fakeSlack();
-    const campaigns = [
-      campaign({
-        id: 100,
-        name: "BCP Healthcare Under-1k (No Team)",
-        client_id: BCP,
-      }),
-      campaign({
-        id: 101,
-        name: "BCP Healthcare Over-1k (With Team)",
-        client_id: BCP,
-      }),
-      campaign({
-        id: 200,
-        name: "Culture Fits Sports Offer - copy",
-        client_id: 777,
-      }),
-    ];
     await withService(
       fakeSmartlead({
-        campaigns,
+        campaigns: [
+          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+          campaign({ id: 200, name: "Vasco - Signal", client_id: 548609 }),
+          campaign({ id: 12, name: "BCP Generic (No Team)", status: "PAUSED", client_id: BCP }),
+          campaign({ id: 3628943, name: "Positive", client_id: null }),
+        ],
         clients: [
-          { id: BCP, name: "BCP", logo: "Bolder Cyber Partners" },
+          { id: BCP, logo: "Bolder Cyber Partners" },
+          { id: 548609, name: "Vasco Warranty" },
+        ],
+        analyticsByDate: {
+          100: { sent_count: 400, data: [{ date: "2026-09-01", sent_count: 400 }] },
+          200: { sent_count: 200, data: [{ date: "2026-09-01", sent_count: 200 }] },
+          12: { sent_count: 50, data: [{ date: "2026-09-01", sent_count: 50 }] },
+          3628943: { sent_count: 10, data: [{ date: "2026-09-01", sent_count: 10 }] },
+        },
+      }),
+      slack,
+      fakeSupabase({
+        registry: new Map([
+          [BCP, "Bolder Cyber Partners"],
+          [548609, "Vasco Warranty"],
+        ]),
+      }),
+      async (watch) => {
+        const result = await watch.runVolumeCheck(noonTue);
+        assert.equal(result.posted, true);
+        assert.equal(result.clients, 2);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*Midday — Tue 9\/1 12:00pm\*/);
+        // 9–18 at noon is ×3: 400→1,200 on track; 200→600 under
+        assert.match(
+          text,
+          /• \*Bolder Cyber Partners\* `#542838` — 400 sent → 1,200 proj · on track/,
+        );
+        assert.match(text, /• \*Vasco Warranty\* `#548609` — 200 sent → 600 proj · \*under\*/);
+        assert.doesNotMatch(text, /Off track/i);
+        assert.doesNotMatch(text, /Positive/);
+        assert.doesNotMatch(text, /Generic/);
+        assert.doesNotMatch(text, /Paused:/);
+      },
+    );
+  });
+
+  it("does not post midday on Saturday and does not catch up", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [campaign({ id: 100, name: "BCP Healthcare", client_id: BCP })],
+        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+        analyticsByDate: { 100: { sent_count: 0, bounce_count: 0 } },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch) => {
+        const result = await watch.runVolumeCheck(noonSat);
+        assert.equal(result.posted, false);
+        assert.equal(slack.posted.length, 0);
+      },
+    );
+  });
+
+  it("keeps midday BCP totals on today's analytics-by-date, not lifetime sent", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+          campaign({
+            id: 200,
+            name: "Culture Fits Sports Offer - copy",
+            client_id: 777,
+          }),
+        ],
+        clients: [
+          { id: BCP, logo: "Bolder Cyber Partners" },
           { id: 777, name: "Culture Fits" },
         ],
         analytics: {
-          100: lifetimeBcpUnder,
-          101: lifetimeBcpOver,
-          200: {
-            total_count: "5315",
-            sent_count: "5315",
-            unique_sent_count: "5315",
-            campaign_lead_stats: { total: 5315, notStarted: 0, inprogress: 200 },
-          },
+          100: { sent_count: "5328", campaign_lead_stats: { total: 5328, notStarted: 0, inprogress: 5328 } },
         },
         analyticsByDate: {
           100: { sent_count: 5328, data: [{ date: "2026-09-01", sent_count: 0, bounce_count: 0 }] },
-          101: { sent_count: 620, data: [{ date: "2026-09-01", sent_count: 0, bounce_count: 0 }] },
-          200: { sent_count: 12, bounce_count: 0 },
+          200: { sent_count: 400, data: [{ date: "2026-09-01", sent_count: 400 }] },
         },
       }),
       slack,
@@ -253,231 +298,221 @@ describe("WatchService attribution and flags", () => {
         ]),
         registry: new Map([[BCP, "Bolder Cyber Partners"]]),
       }),
-      async (watch, state) => {
-        for (const id of [100, 101, 200]) {
-          state.put(id, {
-            status: "ACTIVE",
-            notifiedThresholds: [50],
-            seen: true,
-          });
-        }
-        // Tue 9/1 6:02pm CT — same moment as the bad digest
-        const now = new Date("2026-09-01T23:02:00.000Z");
-        await watch.run(now);
-        const digest = slack.posted.find((text) => text.includes("sent today"));
-        assert.ok(digest, "expected a daily digest");
-        assert.match(digest, /\*Bolder Cyber Partners\* — 0 sent/);
-        assert.doesNotMatch(digest, /\*Bolder Cyber Partners\* — 5,948 sent/);
-        assert.match(digest, /\*Culture Fits\* — 12 sent/);
-        assert.doesNotMatch(digest, /Healthcare Under-1k \(No Team\) — 5,328 sent/);
-      },
-    );
-  });
-
-  it("posts a 2-hour pulse for the Chicago slot that fired, even if drained late", async () => {
-    const slack = fakeSlack();
-    await withService(
-      fakeSmartlead({
-        campaigns: [
-          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
-        ],
-        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
-        analyticsByDate: {
-          100: { sent_count: 0, bounce_count: 0 },
-        },
-        analytics: { 100: lifetimeBcpUnder },
-      }),
-      slack,
-      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
       async (watch) => {
-        // Cron fired 10:05 CT; watch drained at 10:40 CT
-        const firedAt = new Date("2026-09-01T15:05:00.000Z");
-        const result = await watch.runPulse(firedAt);
-        assert.equal(result.posted, true);
-        assert.match(slack.posted[0] ?? "", /Tue 9\/1 10:00am — sent today/);
-        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent$/m);
-        assert.match(slack.posted[0] ?? "", /\*Off track\*/);
-        assert.match(
-          slack.posted[0] ?? "",
-          /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(No Team\) `#100` — too few senders \(1\/1 vs CANON min-40\)/,
-        );
-        assert.doesNotMatch(slack.posted[0] ?? "", /5,328 sent/);
+        await watch.runVolumeCheck(noonTue);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*Bolder Cyber Partners\* `#542838` — 0 sent → 0 proj · \*under\*/);
+        assert.match(text, /\*Culture Fits\* `#777` — 400 sent → 1,200 proj · on track/);
+        assert.doesNotMatch(text, /5,328/);
       },
     );
   });
 
-  it("posts Friday 10am Chicago pulses", async () => {
+  it("posts EOD sends vs 1,200 and flags a client with less than 7 days left", async () => {
     const slack = fakeSlack();
     await withService(
       fakeSmartlead({
         campaigns: [
-          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+          campaign({ id: 100, name: "BCP Healthcare", client_id: BCP }),
+          campaign({ id: 200, name: "Vasco - Signal", client_id: 548609 }),
         ],
-        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
-        analyticsByDate: {
-          100: { sent_count: 12, bounce_count: 0 },
-        },
-      }),
-      slack,
-      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
-      async (watch) => {
-        const result = await watch.runPulse(new Date("2026-08-28T15:05:00.000Z"));
-        assert.equal(result.posted, true);
-        assert.match(slack.posted[0] ?? "", /Fri 8\/28 10:00am — sent today/);
-        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 12 sent/);
-      },
-    );
-  });
-
-  it("does not diagnose 0-send clients on the 8am pulse", async () => {
-    const slack = fakeSlack();
-    await withService(
-      fakeSmartlead({
-        campaigns: [
-          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+        clients: [
+          { id: BCP, logo: "Bolder Cyber Partners" },
+          { id: 548609, name: "Vasco Warranty" },
         ],
-        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
-        analyticsByDate: {
-          100: { sent_count: 0, bounce_count: 0 },
-        },
-        analytics: { 100: lifetimeBcpUnder },
-      }),
-      slack,
-      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
-      async (watch) => {
-        const result = await watch.runPulse(new Date("2026-09-01T13:05:00.000Z"));
-        assert.equal(result.posted, true);
-        assert.match(slack.posted[0] ?? "", /Tue 9\/1 8:00am — sent today/);
-        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent$/m);
-        assert.doesNotMatch(slack.posted[0] ?? "", /too few/);
-      },
-    );
-  });
-
-  it("labels a 0-send client as too few leads when the active list is empty", async () => {
-    const slack = fakeSlack();
-    await withService(
-      fakeSmartlead({
-        campaigns: [
-          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
-        ],
-        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
-        analyticsByDate: {
-          100: { sent_count: 0, bounce_count: 0 },
-        },
         analytics: {
           100: {
-            total_count: "12",
-            sent_count: "12",
-            campaign_lead_stats: { total: 12, notStarted: 0, inprogress: 0 },
+            total_count: "20000",
+            campaign_lead_stats: { total: 20000, notStarted: 15000, inprogress: 5000 },
+          },
+          200: {
+            total_count: "6000",
+            campaign_lead_stats: { total: 6000, notStarted: 4000, inprogress: 1000 },
           },
         },
-        emailAccounts: {
-          100: Array.from({ length: 8 }, (_, index) => ({
-            id: index + 1,
-            from_email: `a${index}@x.com`,
-            is_smtp_success: true,
-            is_imap_success: true,
-            daily_sent_count: 0,
-          })),
+        analyticsByDate: {
+          100: { data: [{ date: "2026-09-01", sent_count: 1180 }] },
+          200: { data: [{ date: "2026-09-01", sent_count: 720 }] },
         },
       }),
       slack,
-      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      fakeSupabase({
+        registry: new Map([
+          [BCP, "Bolder Cyber Partners"],
+          [548609, "Vasco Warranty"],
+        ]),
+      }),
       async (watch) => {
-        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        const result = await watch.runEndOfDay(eodTue);
         assert.equal(result.posted, true);
-        assert.match(slack.posted[0] ?? "", /\*Bolder Cyber Partners\* — 0 sent$/m);
+        assert.equal(result.topUp, 1);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*EOD — Tue 9\/1\*/);
+        assert.match(text, /• \*Bolder Cyber Partners\* `#542838` — 1,180 \/ 1,200/);
+        assert.match(
+          text,
+          /• \*Vasco Warranty\* `#548609` — 720 \/ 1,200 · \*under\* · \*~4\.2d left, needs top-up\*/,
+        );
+        assert.doesNotMatch(text, /Off track/i);
+        assert.doesNotMatch(text, /Still waiting/);
+        assert.doesNotMatch(text, /Finished today/);
+      },
+    );
+  });
+
+  it("does not post EOD on Saturday", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [campaign({ id: 100, name: "BCP Healthcare", client_id: BCP })],
+        analyticsByDate: { 100: { sent_count: 10 } },
+      }),
+      slack,
+      fakeSupabase(),
+      async (watch) => {
+        const result = await watch.runEndOfDay(new Date("2026-09-05T22:30:00.000Z"));
+        assert.equal(result.posted, false);
+        assert.equal(slack.posted.length, 0);
+      },
+    );
+  });
+
+  it("Slacks an autobounce pause immediately with client, campaign id, and reason", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({
+            id: 88,
+            name: "Goliath Displacement S 50-200 CIO",
+            status: "PAUSED",
+            client_id: 9,
+          }),
+        ],
+        clients: [{ id: 9, name: "Goliath Cybersecurity" }],
+        analytics: {
+          88: { sent_count: 195, bounce_count: 16, bounce_rate: 8.2 },
+        },
+        detail: {
+          88: {
+            id: 88,
+            name: "Goliath Displacement S 50-200 CIO",
+            status: "PAUSED",
+            client_id: 9,
+            auto_paused: true,
+          },
+        },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[9, "Goliath Cybersecurity"]]) }),
+      async (watch, state) => {
+        state.put(88, { status: "ACTIVE", notifiedThresholds: [], seen: true });
+        const result = await watch.run(weekdayAfternoon);
+        assert.equal(result.autobounce, 1);
+        assert.equal(result.completion, 0);
+        assert.equal(result.digest, 0);
+        assert.equal(result.heyreach, 0);
+        assert.equal(slack.posted.length, 1);
         assert.match(
           slack.posted[0] ?? "",
-          /• \*Bolder Cyber Partners\* — Healthcare Under-1k \(No Team\) `#100` — too few leads \(notStarted=0, remaining=0\)/,
+          /\*Goliath Cybersecurity\* — \*Goliath Displacement S 50-200 CIO\* `#88` auto-paused/,
         );
+        assert.match(slack.posted[0] ?? "", /8\.2% bounce on 195 sends/);
       },
     );
   });
 
-  it("omits legacy Unknown-client leftovers from the pulse Paused count and sent rollup", async () => {
+  it("does not Slack a manual pause", async () => {
     const slack = fakeSlack();
     await withService(
       fakeSmartlead({
         campaigns: [
           campaign({
-            id: 3628943,
-            name: "Positive",
+            id: 88,
+            name: "Goliath Displacement",
             status: "PAUSED",
-            client_id: null,
-          }),
-          campaign({
-            id: 11,
-            name: "MSRS Ticket Offer Propert Manager",
-            status: "PAUSED",
-            client_id: null,
-          }),
-          campaign({
-            id: 12,
-            name: "BCP Generic (No Team)",
-            status: "PAUSED",
-            client_id: BCP,
+            client_id: 9,
           }),
         ],
-        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
-        analyticsByDate: {
-          3628943: { sent_count: 0, bounce_count: 0 },
-          11: { sent_count: 0, bounce_count: 0 },
-          12: { sent_count: 0, bounce_count: 0 },
+        clients: [{ id: 9, name: "Goliath Cybersecurity" }],
+        analytics: { 88: { sent_count: 400, bounce_count: 4, bounce_rate: 1 } },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[9, "Goliath Cybersecurity"]]) }),
+      async (watch, state) => {
+        state.put(88, { status: "ACTIVE", notifiedThresholds: [], seen: true });
+        const weekday = await watch.run(weekdayAfternoon);
+        assert.equal(weekday.autobounce, 0);
+        assert.equal(slack.posted.length, 0);
+      },
+    );
+  });
+
+  it("does not Slack an autobounce on Saturday (no weekend catch-up)", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({
+            id: 88,
+            name: "Goliath Displacement",
+            status: "PAUSED",
+            client_id: 9,
+          }),
+        ],
+        clients: [{ id: 9, name: "Goliath Cybersecurity" }],
+        analytics: { 88: { sent_count: 195, bounce_count: 16, bounce_rate: 8.2 } },
+        detail: {
+          88: { id: 88, status: "PAUSED", client_id: 9, auto_paused: true },
         },
       }),
       slack,
-      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
-      async (watch) => {
-        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
-        assert.equal(result.posted, true);
-        const text = slack.posted[0] ?? "";
-        assert.match(text, /Paused: 1 \(new pauses still alert via 15m watch\)/);
-        assert.doesNotMatch(text, /\*Paused\*/);
-        assert.doesNotMatch(text, /Generic \(No Team\)/);
-        assert.doesNotMatch(text, /Unknown client/);
-        assert.doesNotMatch(text, /Positive/);
-        assert.doesNotMatch(text, /Propert Manager/);
-        assert.doesNotMatch(text, /• /);
+      fakeSupabase({ registry: new Map([[9, "Goliath Cybersecurity"]]) }),
+      async (watch, state) => {
+        state.put(88, { status: "ACTIVE", notifiedThresholds: [], seen: true });
+        const result = await watch.run(new Date("2026-09-05T16:10:00.000Z"));
+        assert.equal(result.autobounce, 0);
+        assert.equal(slack.posted.length, 0);
+        assert.equal(state.snapshot(88).status, "PAUSED");
       },
     );
   });
 
-  it("names a pause newly seen this Chicago day", async () => {
+  it("does not Slack a digest or Off track pulse from the 15-minute watch", async () => {
     const slack = fakeSlack();
     await withService(
       fakeSmartlead({
         campaigns: [
           campaign({
-            id: 12,
-            name: "BCP Generic (No Team)",
-            status: "PAUSED",
-            client_id: BCP,
+            id: 50,
+            name: "Vasco - Signal - Warranty Admin Hiring",
+            client_id: 548609,
           }),
         ],
-        clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
-        analyticsByDate: { 12: { sent_count: 0, bounce_count: 0 } },
+        clients: [{ id: 548609, name: "Vasco Warranty" }],
+        analytics: {
+          50: {
+            total_count: "200",
+            unique_sent_count: "20",
+            campaign_lead_stats: { total: 200, notStarted: 160, inprogress: 20 },
+          },
+        },
+        analyticsByDate: { 50: { sent_count: 20, bounce_count: 0 } },
       }),
       slack,
-      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      fakeSupabase({ registry: new Map([[548609, "Vasco Warranty"]]) }),
       async (watch, state) => {
-        state.put(12, {
-          status: "PAUSED",
-          notifiedThresholds: [],
-          seen: true,
-          lastAutobounceAlertAt: "2026-09-01T15:12:00.000Z",
-        });
-        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
-        assert.equal(result.posted, true);
-        const text = slack.posted[0] ?? "";
-        assert.match(text, /Paused: 1 \(new pauses still alert via 15m watch\)/);
-        assert.match(text, /• \*Bolder Cyber Partners\* — Generic \(No Team\) `#12` \(today\)/);
+        state.put(50, { status: "ACTIVE", notifiedThresholds: [50], seen: true });
+        const result = await watch.run(new Date("2026-09-01T23:02:00.000Z"));
+        assert.equal(result.digest, 0);
+        assert.doesNotMatch(slack.posted.join("\n"), /sent today/);
+        assert.doesNotMatch(slack.posted.join("\n"), /Off track/i);
+        assert.doesNotMatch(slack.posted.join("\n"), /Still waiting/);
       },
     );
   });
 
-  it("Slacks nearly-done and finished after hours instead of eating the flag", async () => {
+  it("Slacks nearly-done and finished on a weekday, including after hours", async () => {
     const slack = fakeSlack();
     await withService(
       fakeSmartlead({
@@ -502,7 +537,6 @@ describe("WatchService attribution and flags", () => {
       fakeSupabase({ registry: new Map([[548609, "Vasco Warranty"]]) }),
       async (watch, state) => {
         state.put(50, { status: "ACTIVE", notifiedThresholds: [50], seen: true });
-        // 6:02pm CT — previously dropped 75/90 because afterHours
         const result = await watch.run(new Date("2026-09-01T23:02:00.000Z"));
         assert.equal(result.completion, 2);
         assert.equal(
@@ -520,7 +554,7 @@ describe("WatchService attribution and flags", () => {
     );
   });
 
-  it("posts a finished-list Slack payload when the campaign hits 100%", async () => {
+  it("posts a finished-list Slack when the campaign hits 100%", async () => {
     const slack = fakeSlack();
     await withService(
       fakeSmartlead({
@@ -545,12 +579,49 @@ describe("WatchService attribution and flags", () => {
       fakeSupabase({ registry: new Map([[548609, "Vasco Warranty"]]) }),
       async (watch, state) => {
         state.put(51, { status: "ACTIVE", notifiedThresholds: [50, 75, 90], seen: true });
-        const result = await watch.run(new Date("2026-09-01T16:10:00.000Z"));
+        const result = await watch.run(weekdayAfternoon);
         assert.equal(result.completion, 1);
         assert.equal(
           slack.posted[0],
           "*Vasco Warranty* — *Vasco - Service - Standard Brands* finished the list. This client now has nothing sending — flag for a lead refill.",
         );
+      },
+    );
+  });
+
+  it("does not Slack completion on Saturday and does not catch up Monday", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({
+            id: 50,
+            name: "Vasco - Signal - Warranty Admin Hiring",
+            client_id: 548609,
+          }),
+        ],
+        clients: [{ id: 548609, name: "Vasco Warranty" }],
+        analytics: {
+          50: {
+            total_count: "1000",
+            unique_sent_count: "900",
+            campaign_lead_stats: { total: 1000, notStarted: 40, inprogress: 60 },
+          },
+        },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[548609, "Vasco Warranty"]]) }),
+      async (watch, state) => {
+        state.put(50, { status: "ACTIVE", notifiedThresholds: [50], seen: true });
+        const sat = await watch.run(new Date("2026-09-05T16:10:00.000Z"));
+        assert.equal(sat.completion, 0);
+        assert.equal(slack.posted.length, 0);
+        assert.ok(state.snapshot(50).notifiedThresholds.includes(75));
+        assert.ok(state.snapshot(50).notifiedThresholds.includes(90));
+
+        const mon = await watch.run(new Date("2026-09-07T16:10:00.000Z"));
+        assert.equal(mon.completion, 0);
+        assert.equal(slack.posted.length, 0);
       },
     );
   });
@@ -581,7 +652,7 @@ describe("WatchService HeyReach runway", () => {
       slack,
       fakeSupabase(),
       async (watch, state) => {
-        const now = new Date("2026-09-01T16:10:00.000Z");
+        const now = weekdayAfternoon;
         const first = await watch.run(now);
         assert.equal(first.heyreach, 0);
         assert.equal(slack.posted.length, 0);
@@ -631,7 +702,7 @@ describe("WatchService HeyReach runway", () => {
       slack,
       fakeSupabase(),
       async (watch, state) => {
-        const now = new Date("2026-09-01T16:10:00.000Z");
+        const now = weekdayAfternoon;
         await watch.run(now);
         state.putHeyreach("salesglider", 530529, {
           status: "IN_PROGRESS",
@@ -677,8 +748,41 @@ describe("WatchService HeyReach runway", () => {
           notifiedUnder7: false,
           notifiedPendingDry: false,
         });
-        const result = await watch.run(new Date("2026-09-01T16:10:00.000Z"));
+        const result = await watch.run(weekdayAfternoon);
         assert.equal(result.heyreach, 0);
+        assert.equal(slack.posted.length, 0);
+      },
+      [heyreach],
+    );
+  });
+
+  it("does not Slack HeyReach on Saturday and does not catch up Monday", async () => {
+    const slack = fakeSlack();
+    const heyreach = fakeHeyReach({
+      workspace: { id: "techevo", clientName: "TechEvolution" },
+      campaigns: [
+        { id: 566902, name: "TechEvo NE IT DM v2", pending: 0, inProgress: 21, total: 45 },
+      ],
+      byDayStats: { 566902: weekdayPace },
+    });
+    await withService(
+      fakeSmartlead({ campaigns: [] }),
+      slack,
+      fakeSupabase(),
+      async (watch, state) => {
+        state.putHeyreach("techevo", 566902, {
+          status: "IN_PROGRESS",
+          seen: true,
+          notifiedUnder7: false,
+          notifiedPendingDry: false,
+        });
+        const sat = await watch.run(new Date("2026-09-05T16:10:00.000Z"));
+        assert.equal(sat.heyreach, 0);
+        assert.equal(slack.posted.length, 0);
+        assert.equal(state.heyreachSnapshot("techevo", 566902).notifiedUnder7, true);
+
+        const mon = await watch.run(new Date("2026-09-07T16:10:00.000Z"));
+        assert.equal(mon.heyreach, 0);
         assert.equal(slack.posted.length, 0);
       },
       [heyreach],

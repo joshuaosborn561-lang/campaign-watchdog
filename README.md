@@ -1,33 +1,34 @@
 # Campaign Watchdog
 
-Railway app that pings Slack when a Smartlead campaign:
+Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GSAC`). No weekend posts or Monday catch-ups. Watchdog never changes campaign settings, pauses/resumes lists, restaffs senders, or spends money.
 
-- is **nearly done (75% / 90%)** so Josh/Cayden can queue a lead refill before the client goes dark
-- **finishes the list (~100%)**, and says whether that **client** still has another ACTIVE campaign with leads left
-- **pauses from autobounce**
-- under-sends **for a real reason** (unstaffed, inboxes down, or far below what the schedule + 10-min gap allowed) — not just “short by N”
+## What posts (final)
 
-It also watches **HeyReach** `IN_PROGRESS` LinkedIn campaigns (workspace keys only) and pages when runway is under 7 weekday-days or pending is dry (0 new starts). Deliverability still owns bounce/CANON; this is inventory only. SalesGlider Call Followups `#530529` is excluded (intentional inbound drip). Lead Top Up owns the refill after the yell.
+| Post | When | Copy |
+| --- | --- | --- |
+| Midday | `VOLUME_CRON` default `10 12 * * 1-5` America/Chicago. Projection snaps to 12:00. | `*Midday — Tue 9/1 12:00pm*` then `• *Client* \`#id\` — 200 sent → 600 proj · *under*` |
+| Autobounce | Every 15 minutes (`CRON`), weekdays only. First-seen is seeded with no Slack. | `*Client* — *Campaign* \`#id\` auto-paused (8.2% bounce on 195 sends).` |
+| Nearly done / finished | Same 15-minute watch, weekdays only, as soon as 75% / 90% / 100% is crossed. 50% is tracked in state but not Slacked. | `*Client* — *Campaign* is nearly done (75%, 238 left). Refill soon.` / `finished the list.` plus whether the client still has another ACTIVE list with leads. |
+| HeyReach runway | Same 15-minute watch, weekdays only. `IN_PROGRESS` only. Call Followups `#530529` never alerts. | `*Client* — *Campaign* is nearly done (~5.8d LinkedIn runway, 21 left, 0 pending). Refill soon.` |
+| EOD | `EOD_CRON` default `30 17 * * 1-5` America/Chicago. Grace until ~6:30pm the same weekday. | `*EOD — Tue 9/1*` then `• *Client* \`#id\` — 720 / 1,200 · *under* · *~4.2d left, needs top-up*` |
 
-Every Slack message names the **client** and **campaign**. 50% is tracked in state but not Slacked (too early, too noisy). Canary shells, word-hunt shells, and Generic pools never get completion alerts.
+Midday flags `*under*` when projected &lt; 1,080 (more than 10% under the 1,200-send / 40-sender day). EOD compares actual sends to 1,200 and flags a client when remaining leads / 1,200 is under 7 days.
 
-Channel: `C0BT978GSAC`
+## What no longer posts
 
-## How it works
+- 2-hour **pulse** walls (`Fri 10/2 10:00am — sent today` plus the huge **Off track** campaign list)
+- Nightly **daily digest** (campaign-by-campaign “still waiting / finished today / paused”), including the Saturday 11pm wrap-up
+- Standing / manual **pause** names (only bounce-protection auto-pauses Slack)
 
-A cron (every 15 minutes, America/Chicago) walks ACTIVE/PAUSED Smartlead campaigns, then any configured HeyReach workspaces.
+## How volume math works
 
-| Alert | When it fires |
-| --- | --- |
-| Nearly done | Crosses 75% or 90% with leads still left. Copy: `is nearly done (75%, 238 left). Refill soon.` Skipped if the campaign is already ~100% on that same pass (so a finished list never dumps 75/90/100 together). Posted as soon as the 15-minute watch sees the crossing — including after 5pm. The threshold is not marked sent until Slack succeeds. |
-| Finished | Crosses ~100%. `finished the list.` If the same client has no other ACTIVE non-noise campaign with remaining leads: `This client now has nothing sending — flag for a lead refill.` If they still do: `This client still has other active campaigns with leads left.` Same posting rule as nearly-done. |
-| HeyReach runway | `IN_PROGRESS` only. Remaining = pending + inProgress. Weekday pace = average of `connectionsSent + messagesSent`. Runway = remaining / pace. Slack when runway is under 7 days or pending = 0. Copy: `is nearly done (~5.8d LinkedIn runway, 21 left, 0 pending). Refill soon.` First seen is seeded with no Slack. Call Followups `530529` never alerts. Dedup keys: `heyreach:under7:v1:{id}` and `heyreach:pending-dry:v1:{id}` in `/data` + `campaign_watchdog_alerts` so a weekday Lead Top Up board can share them. |
-| First seen | Seeded with no Slack, so campaigns already past 75/90/100 (or already under-7 / pending-dry on HeyReach) do not dump on deploy. |
-| Autobounce / pause | Campaign newly becomes `PAUSED` (15-minute watch) — posted as its own Slack. The 2-hour pulse and daily digest only show a `Paused: N` count (standing holds are not named). Optional pulse line for pauses first seen this Chicago day. Canary and word-hunt shells are ignored. |
-| Sending | After that campaign's send window ends: diagnose why volume is low. Slack only if it's unstaffed, SMTP/IMAP down, or far below what leads + daily cap + 10-min gap allowed. A Parlay campaign that only had 15 scheduled does not alert. |
-| Pulse | Mon–Fri 8:05am–4:05pm America/Chicago every 2 hours: emails sent + bounce per client, a `Paused: N (new pauses still alert via 15m watch)` count, and from 10am an **Off track** section for ACTIVE campaigns that are not sending — one line each (`client — campaign #id — reason`). Reasons: too few senders vs CANON min-40, too few leads (`notStarted≈0` / remaining thin), or SMTP/IMAP down. Cron fires at :05; if the 15-minute watch is still running, the pulse is queued and still posts that slot (up to ~110 minutes late). No 5pm pulse — the daily digest is the only wrap-up. Day totals use that Chicago calendar date. |
+**Projection:** union of that client's ACTIVE Smartlead send windows (real `scheduler_cron_value` when present, else 9:00–17:00 CT). At noon a 9:00–18:00 window is one third of the day, so projected = today × 3. Windows in other timezones are converted to Chicago minutes.
 
-Client names come from Smartlead `client_id` first (`/client/` + `_meta.client_registry`), then campaignintelligence only when it agrees on that id. A stale `client_name` never moves another client's volume onto BCP. Untagged campaigns stay `Unknown client`. Sent totals are that campaign's analytics-by-date for the Chicago day — never lifetime or account-wide sent.
+**Top-up:** remaining = `notStarted + inProgress` across ACTIVE lists. Days left = remaining / 1,200.
+
+**Skip (midday/EOD):** canary / word-hunt / pod-control shells and the pulse-exclude leftovers (Nieto / MSRS / Positive). Clients with no ACTIVE send-day campaigns are omitted.
+
+Client names come from Smartlead `client_id` first (`/client/` + `_meta.client_registry`). Sent totals are that campaign's analytics-by-date for the Chicago day — never lifetime.
 
 ## Env
 
@@ -37,12 +38,15 @@ See `.env.example`. Minimum:
 - `SLACK_BOT_TOKEN` or rotating `SLACK_ACCESS_TOKEN` + `SLACK_REFRESH_TOKEN` + Slack app client id/secret
 - `SLACK_CHANNEL_ID=C0BT978GSAC`
 - `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (client names + alert dedupe)
-- Optional HeyReach workspace keys: `HEYREACH_SALESGLIDER_API_KEY`, `HEYREACH_TECHEVO_API_KEY` (never the org/`heyreach_master` key)
+- Optional HeyReach workspace keys: `HEYREACH_SALESGLIDER_API_KEY`, `HEYREACH_TECHEVO_API_KEY`
+
+Optional: `VOLUME_CRON`, `EOD_CRON`, `VOLUME_TARGET_SENDS` (default 1200), `VOLUME_ALERT_MAX` (default 1080). Existing `PULSE_CRON` is ignored (safe to leave on Railway).
 
 Mount a volume at `/data` so `STATE_FILE_PATH=/data/watchdog-state.json` survives restarts.
 
 ## HTTP
 
 - `GET /health`
-- `POST /run` with `X-Run-Token` if `RUN_TOKEN` is set
-- `POST /pulse` with the same token — client sent/bounce, `Paused: N`, optional Off track lines
+- `POST /run` — 15-minute watch (`X-Run-Token` if `RUN_TOKEN` is set)
+- `POST /midday` — same token; no-ops outside the weekday noon window
+- `POST /eod` — same token; no-ops outside the weekday 5–6pm window

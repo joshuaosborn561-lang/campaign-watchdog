@@ -25,6 +25,13 @@ describe("loadConfig", () => {
     assert.deepEqual(config.pulseExcludeCampaignIds, DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS);
     assert.deepEqual(config.pulseExcludeCampaignNames, DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES);
     assert.ok(config.pulseExcludeCampaignNames.includes("MSRS Ticket Offer Propert Manager"));
+    assert.equal(config.volumeCron, "10 12 * * 1-5");
+    assert.equal(config.volumeHour, 12);
+    assert.deepEqual(config.volumeWeekdays, [1, 2, 3, 4, 5]);
+    assert.equal(config.volumeTargetSends, 1200);
+    assert.equal(config.volumeAlertMax, 1080);
+    assert.equal(config.eodCron, "30 17 * * 1-5");
+    assert.equal(config.eodHour, 17);
   });
 
   it("merges extra pulse exclude ids and names onto the built-in defaults", () => {

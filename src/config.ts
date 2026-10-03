@@ -3,6 +3,13 @@ import {
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
   DEFAULT_PULSE_WEEKDAYS,
 } from "./lib/pulse.js";
+import {
+  DEFAULT_VOLUME_WEEKDAYS,
+  EOD_HOUR,
+  VOLUME_ALERT_MAX,
+  VOLUME_SLOT_HOUR,
+  VOLUME_TARGET_SENDS,
+} from "./lib/volume.js";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -205,6 +212,13 @@ export interface AppConfig {
   heyreachWeekdays: number[];
   pulseExcludeCampaignIds: number[];
   pulseExcludeCampaignNames: string[];
+  volumeCron: string;
+  volumeHour: number;
+  volumeWeekdays: number[];
+  volumeTargetSends: number;
+  volumeAlertMax: number;
+  eodCron: string;
+  eodHour: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -258,6 +272,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         "PULSE_EXCLUDE_CAMPAIGN_NAMES",
         DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
       ),
+      volumeCron: optional("VOLUME_CRON", "10 12 * * 1-5"),
+      volumeHour: optionalNumber("VOLUME_HOUR", VOLUME_SLOT_HOUR),
+      volumeWeekdays: csvNumbers("VOLUME_WEEKDAYS", DEFAULT_VOLUME_WEEKDAYS),
+      volumeTargetSends: optionalNumber("VOLUME_TARGET_SENDS", VOLUME_TARGET_SENDS),
+      volumeAlertMax: optionalNumber("VOLUME_ALERT_MAX", VOLUME_ALERT_MAX),
+      eodCron: optional("EOD_CRON", "30 17 * * 1-5"),
+      eodHour: optionalNumber("EOD_HOUR", EOD_HOUR),
     };
   } finally {
     process.env = previous;

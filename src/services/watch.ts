@@ -22,35 +22,25 @@ import {
   thresholdsReached,
   type ClientCampaignLeadRow,
 } from "../lib/completion.js";
-import { classifyInboxes } from "../lib/inboxes.js";
 import {
-  formatDailyDigest,
   formatFinishedMessage,
   formatNearlyDoneMessage,
   formatPauseMessage,
-  type DigestCampaign,
 } from "../lib/digest.js";
-import {
-  isSendDay,
-  parseCampaignSchedule,
-  windowHasEnded,
-} from "../lib/schedule.js";
-import { diagnoseSending } from "../lib/sending.js";
+import { isSendDay, parseCampaignSchedule } from "../lib/schedule.js";
 import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
 import { resolveClient } from "../lib/clients.js";
+import { parseTodayVolume } from "../lib/pulse.js";
 import {
-  classifyPulseOffTrack,
-  formatClientPulse,
-  isPulseExcludedCampaign,
-  parseTodayVolume,
-  pausedSeenOnDay,
-  PULSE_SHORTFALL_AFTER_HOUR,
-  resolvePulseSlot,
-  rollupClientPulse,
-  stillPausedCampaigns,
-  type OffTrackPulseRow,
-  type PausedPulseRow,
-} from "../lib/pulse.js";
+  formatEodReport,
+  formatMiddayReport,
+  isVolumeSkippedCampaign,
+  resolveEodSlot,
+  resolveVolumeSlot,
+  rollupClientEod,
+  rollupClientVolume,
+  type VolumeCampaignInput,
+} from "../lib/volume.js";
 import { unwrap } from "../lib/parse.js";
 import {
   addUtcDays,
@@ -64,7 +54,7 @@ import {
   shouldAlertHeyReach,
   weekdayPaceFromStats,
 } from "../lib/heyreach.js";
-import { hourInZone, ymdInZone } from "../lib/time.js";
+import { isWeekendInZone, ymdInZone } from "../lib/time.js";
 import type { StateStore } from "../state/store.js";
 
 export { resolveClient, resolveClientName } from "../lib/clients.js";
@@ -111,6 +101,10 @@ export class WatchService {
       heyreachClients ?? config.heyreachWorkspaces.map((workspace) => new HeyReachClient(workspace));
   }
 
+  /**
+   * 15-minute watch. Weekday Slack: autobounce pauses, 75/90/100 completion,
+   * and HeyReach runway / pending-dry. No digest, pulse, or weekend posts.
+   */
   async run(now = new Date()): Promise<WatchResult> {
     const result: WatchResult = {
       scanned: 0,
@@ -121,20 +115,9 @@ export class WatchService {
       heyreach: 0,
       errors: [],
     };
-    const digestRows: DigestCampaign[] = [];
-    let digestPending = 0;
+    const allowSlack = !isWeekendInZone(now, this.config.sendShortfallTimezone);
 
-    const [campaigns, clients, supabaseCampaigns, registry] = await Promise.all([
-      this.smartlead.listCampaigns(),
-      this.smartlead.listClients().catch(() => [] as SmartleadClientRecord[]),
-      this.supabase.enabled()
-        ? this.supabase.fetchCampaignNames().catch(() => new Map<number, CampaignNameRow>())
-        : Promise.resolve(new Map<number, CampaignNameRow>()),
-      this.supabase.enabled()
-        ? this.supabase.fetchClientRegistry().catch(() => new Map<number, string>())
-        : Promise.resolve(new Map<number, string>()),
-    ]);
-
+    const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
     const clientsById = new Map(clients.map((client) => [client.id, client]));
     const watch = new Set(this.config.watchStatuses);
     const day = ymdInZone(now, this.config.sendShortfallTimezone);
@@ -144,7 +127,6 @@ export class WatchService {
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
       const status = String(campaign.status ?? "").toUpperCase();
-      if (!watch.has(status) && status !== "PAUSED") continue;
       if (!watch.has(status)) continue;
       result.scanned += 1;
       try {
@@ -155,14 +137,10 @@ export class WatchService {
           supabaseCampaigns,
           registry,
           day,
-          now,
+          allowSlack,
           result,
-          digestRows,
           inventory,
           pendingCompletion,
-          onPendingDigest: () => {
-            digestPending += 1;
-          },
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -171,56 +149,189 @@ export class WatchService {
       await sleep(150);
     }
 
-    await this.flushCompletionAlerts(pendingCompletion, inventory, now, result);
-
-    const hour = hourInZone(now, this.config.sendShortfallTimezone);
-    const wrapUp = hour >= 19;
-    if (digestRows.length && (digestPending === 0 || wrapUp)) {
-      const text = formatDailyDigest(day, digestRows);
-      if (text) {
-        const key = `digest:v3:${day}`;
-        if (!(await this.alreadySent(key))) {
-          await this.notify(text, {
-            key,
-            campaignId: 0,
-            clientName: "All clients",
-            campaignName: `Daily digest ${day}`,
-            kind: "digest",
-            payload: { day, clients: digestRows.length },
-          });
-          this.state.setLastDigestDay(day);
-          result.digest = 1;
-        } else {
-          this.state.setLastDigestDay(day);
-        }
-      }
+    if (allowSlack) {
+      await this.flushCompletionAlerts(pendingCompletion, inventory, result);
     }
-
-    await this.inspectHeyReach(day, result);
+    await this.inspectHeyReach(day, result, allowSlack);
     await this.state.save();
     return result;
   }
 
-  async runPulse(now = new Date()): Promise<{ posted: boolean; clients: number; paused: number }> {
+  /**
+   * Weekday noon send tracking. One line per active client; flags projected
+   * more than 10% under the 1,200-send day. Read-only.
+   */
+  async runVolumeCheck(
+    now = new Date(),
+  ): Promise<{ posted: boolean; flagged: number; clients: number }> {
     const timeZone = this.config.sendShortfallTimezone;
-    const resolved = resolvePulseSlot(
+    const resolved = resolveVolumeSlot(
       now,
       timeZone,
-      this.config.pulseHours,
-      this.config.pulseWeekdays,
+      this.config.volumeWeekdays,
+      this.config.volumeHour,
     );
     if (!resolved) {
-      return { posted: false, clients: 0, paused: 0 };
+      return { posted: false, flagged: 0, clients: 0 };
     }
 
-    const { day, hour, slot } = resolved;
-    const key = `pulse:v2:${slot}`;
-    if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
-      this.state.setLastPulseSlot(slot);
-      return { posted: false, clients: 0, paused: 0 };
+    const { day, slot } = resolved;
+    const key = `volume:v1:${day}`;
+    if (this.state.lastVolumeDay() === day || (await this.alreadySent(key))) {
+      this.state.setLastVolumeDay(day);
+      return { posted: false, flagged: 0, clients: 0 };
     }
 
-    const [campaigns, clients, supabaseCampaigns, registry] = await Promise.all([
+    const rows = await this.collectActiveClientRows(now, day);
+    const rolled = rollupClientVolume(rows, now, timeZone, this.config.volumeHour);
+    const text = formatMiddayReport(rolled, day);
+    this.state.setLastVolumeDay(day);
+    if (!text) {
+      await this.state.save();
+      return { posted: false, flagged: 0, clients: rolled.length };
+    }
+
+    await this.notify(text, {
+      key,
+      campaignId: 0,
+      clientName: "All clients",
+      campaignName: `Midday volume ${slot}`,
+      kind: "volume",
+      payload: {
+        day,
+        clients: rolled.map((row) => ({
+          clientId: row.clientId,
+          clientName: row.clientName,
+          sent: row.sent,
+          projected: row.projected,
+          under: row.under,
+        })),
+      },
+    });
+    await this.state.save();
+    return {
+      posted: true,
+      flagged: rolled.filter((row) => row.under).length,
+      clients: rolled.length,
+    };
+  }
+
+  /**
+   * Weekday 5–6pm CT wrap-up. Sends today vs 1,200, plus clients with
+   * fewer than 7 days of email sends left. Read-only.
+   */
+  async runEndOfDay(
+    now = new Date(),
+  ): Promise<{ posted: boolean; under: number; topUp: number; clients: number }> {
+    const timeZone = this.config.sendShortfallTimezone;
+    const resolved = resolveEodSlot(now, timeZone, this.config.volumeWeekdays, this.config.eodHour);
+    if (!resolved) {
+      return { posted: false, under: 0, topUp: 0, clients: 0 };
+    }
+
+    const { day, slot } = resolved;
+    const key = `eod:v1:${day}`;
+    if (this.state.lastEodDay() === day || (await this.alreadySent(key))) {
+      this.state.setLastEodDay(day);
+      return { posted: false, under: 0, topUp: 0, clients: 0 };
+    }
+
+    const rows = await this.collectActiveClientRows(now, day);
+    const rolled = rollupClientEod(
+      rows,
+      this.config.volumeTargetSends,
+      this.config.volumeAlertMax,
+    );
+    const text = formatEodReport(rolled, day, this.config.volumeTargetSends);
+    this.state.setLastEodDay(day);
+    if (!text) {
+      await this.state.save();
+      return { posted: false, under: 0, topUp: 0, clients: rolled.length };
+    }
+
+    await this.notify(text, {
+      key,
+      campaignId: 0,
+      clientName: "All clients",
+      campaignName: `EOD volume ${slot}`,
+      kind: "eod",
+      payload: {
+        day,
+        clients: rolled.map((row) => ({
+          clientId: row.clientId,
+          clientName: row.clientName,
+          sent: row.sent,
+          remaining: row.remaining,
+          daysLeft: row.daysLeft,
+          under: row.under,
+          needsTopUp: row.needsTopUp,
+        })),
+      },
+    });
+    await this.state.save();
+    return {
+      posted: true,
+      under: rolled.filter((row) => row.under).length,
+      topUp: rolled.filter((row) => row.needsTopUp).length,
+      clients: rolled.length,
+    };
+  }
+
+  private async collectActiveClientRows(now: Date, day: string): Promise<VolumeCampaignInput[]> {
+    const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
+    const clientsById = new Map(clients.map((client) => [client.id, client]));
+    const mute = {
+      ids: this.config.pulseExcludeCampaignIds,
+      names: this.config.pulseExcludeCampaignNames,
+    };
+    const timeZone = this.config.sendShortfallTimezone;
+    const rows: VolumeCampaignInput[] = [];
+
+    for (const campaign of campaigns) {
+      if (isVolumeSkippedCampaign(campaign, mute)) continue;
+      const status = String(campaign.status ?? "").toUpperCase();
+      if (status !== "ACTIVE") continue;
+      const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
+      try {
+        const [today, settings, detail, analytics] = await Promise.all([
+          this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day).catch(() => null),
+          this.smartlead.getCampaignSettings(campaign.id).catch(() => null),
+          this.smartlead.getCampaign(campaign.id).catch(() => campaign),
+          this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null),
+        ]);
+        const schedule = parseCampaignSchedule(
+          { ...(unwrap(settings) ?? {}), ...(unwrap(detail) ?? {}) },
+          {
+            timeZone,
+            gapMinutes: this.config.mailboxMinTimeGapMins,
+          },
+        );
+        if (!isSendDay(schedule, now)) continue;
+        const volume = parseTodayVolume(today, day);
+        const stats =
+          parseCampaignLeadStats(analytics) ?? parseCampaignLeadStats(detail);
+        rows.push({
+          clientId: resolvedClient.clientId,
+          clientName: resolvedClient.clientName,
+          sent: volume.sent,
+          remaining: stats?.remaining ?? null,
+          schedule,
+        });
+      } catch (error) {
+        console.warn(
+          `[watchdog] volume #${campaign.id} ${campaign.name}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+      await sleep(120);
+    }
+    return rows;
+  }
+
+  private async loadDirectories(): Promise<
+    [SmartleadCampaign[], SmartleadClientRecord[], Map<number, CampaignNameRow>, Map<number, string>]
+  > {
+    return Promise.all([
       this.smartlead.listCampaigns(),
       this.smartlead.listClients().catch(() => [] as SmartleadClientRecord[]),
       this.supabase.enabled()
@@ -230,145 +341,6 @@ export class WatchService {
         ? this.supabase.fetchClientRegistry().catch(() => new Map<number, string>())
         : Promise.resolve(new Map<number, string>()),
     ]);
-    const clientsById = new Map(clients.map((client) => [client.id, client]));
-    const pulseExclude = {
-      ids: this.config.pulseExcludeCampaignIds,
-      names: this.config.pulseExcludeCampaignNames,
-    };
-    const rows: Array<{
-      clientId: number | null;
-      clientName: string;
-      sent: number;
-      bounced: number;
-    }> = [];
-    const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns, pulseExclude).map((campaign) => {
-      const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
-      return {
-        clientName: resolvedClient.clientName,
-        campaignName: campaign.name,
-        campaignId: campaign.id,
-      };
-    });
-    const idleActive: Array<{
-      campaign: SmartleadCampaign;
-      clientName: string;
-      sent: number;
-    }> = [];
-
-    for (const campaign of campaigns) {
-      if (isNoiseCampaign(campaign.name)) continue;
-      if (isPulseExcludedCampaign(campaign, pulseExclude)) continue;
-      const status = String(campaign.status ?? "").toUpperCase();
-      if (status !== "ACTIVE" && status !== "PAUSED") continue;
-      const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
-      try {
-        const today = await this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day);
-        const volume = parseTodayVolume(today, day);
-        rows.push({
-          clientId: resolvedClient.clientId,
-          clientName: resolvedClient.clientName,
-          sent: volume.sent,
-          bounced: volume.bounced,
-        });
-        if (status === "ACTIVE" && volume.sent <= 2) {
-          idleActive.push({
-            campaign,
-            clientName: resolvedClient.clientName,
-            sent: volume.sent,
-          });
-        }
-      } catch (error) {
-        console.warn(
-          `[watchdog] pulse #${campaign.id} ${campaign.name}:`,
-          error instanceof Error ? error.message : error,
-        );
-      }
-      await sleep(120);
-    }
-
-    const rolled = rollupClientPulse(rows);
-    if (!rolled.length && !paused.length) return { posted: false, clients: 0, paused: 0 };
-
-    const offTrack =
-      hour >= PULSE_SHORTFALL_AFTER_HOUR
-        ? await this.collectPulseOffTrack(idleActive)
-        : [];
-    const pausedToday = pausedSeenOnDay(
-      paused,
-      new Map(
-        paused.flatMap((row) =>
-          row.campaignId != null
-            ? [[row.campaignId, this.state.snapshot(row.campaignId).lastAutobounceAlertAt] as const]
-            : [],
-        ),
-      ),
-      day,
-      timeZone,
-    );
-
-    await this.notify(
-      formatClientPulse({
-        day,
-        hour,
-        clients: rolled,
-        bounceWarn: this.config.bounceAutoPauseThreshold,
-        paused,
-        pausedToday,
-        offTrack,
-        exclude: pulseExclude,
-      }),
-      {
-        key,
-        campaignId: 0,
-        clientName: "All clients",
-        campaignName: `Client pulse ${slot}`,
-        kind: "pulse",
-        payload: { day, hour, clients: rolled, paused, offTrack },
-      },
-    );
-    this.state.setLastPulseSlot(slot);
-    await this.state.save();
-    return { posted: true, clients: rolled.length, paused: paused.length };
-  }
-
-  /** Diagnose ACTIVE camps that are not tracking send volume (from 10am). */
-  private async collectPulseOffTrack(
-    idleActive: Array<{ campaign: SmartleadCampaign; clientName: string; sent: number }>,
-  ): Promise<OffTrackPulseRow[]> {
-    const offTrack: OffTrackPulseRow[] = [];
-    for (const row of idleActive) {
-      const analytics = await this.smartlead.getCampaignAnalytics(row.campaign.id).catch(() => null);
-      const stats = parseCampaignLeadStats(analytics);
-      const accounts = await this.smartlead.getCampaignEmailAccounts(row.campaign.id).catch(() => []);
-      const inboxes = classifyInboxes(
-        accounts.map((account) => ({
-          id: account.id,
-          email: account.from_email ?? account.email ?? account.username,
-          smtpOk: account.is_smtp_success !== false,
-          imapOk: account.is_imap_success !== false,
-          dailySent: account.daily_sent_count ?? 0,
-        })),
-      );
-      const miss = classifyPulseOffTrack({
-        sent: row.sent,
-        remaining: stats?.remaining ?? null,
-        notStarted: stats?.notStarted ?? null,
-        staffable: inboxes.staffable,
-        attached: inboxes.attached,
-        disconnected: inboxes.disconnected,
-      });
-      if (miss) {
-        offTrack.push({
-          clientName: row.clientName,
-          campaignName: row.campaign.name,
-          campaignId: row.campaign.id,
-          reason: miss.reason,
-          kind: miss.kind,
-        });
-      }
-      await sleep(80);
-    }
-    return offTrack;
   }
 
   private async inspectCampaign(input: {
@@ -378,12 +350,10 @@ export class WatchService {
     supabaseCampaigns: Map<number, CampaignNameRow>;
     registry: Map<number, string>;
     day: string;
-    now: Date;
+    allowSlack: boolean;
     result: WatchResult;
-    digestRows: DigestCampaign[];
     inventory: ClientCampaignLeadRow[];
     pendingCompletion: PendingCompletion[];
-    onPendingDigest: () => void;
   }): Promise<void> {
     const snapshot = this.state.snapshot(input.campaign.id);
     const firstSeen = !snapshot.seen;
@@ -436,14 +406,19 @@ export class WatchService {
           this.config.completionThresholds,
         );
         const slackable = new Set(completionAlertsToPost(fresh, percent));
-        // Record 50% (and anything we will not Slack) now. 75/90/100 stay
-        // pending until Slack succeeds so an after-hours skip cannot eat them.
+        // Record 50% (and anything we will not Slack) now. On weekdays,
+        // 75/90/100 stay pending until Slack succeeds. On weekends they
+        // are marked here so Monday does not catch up.
         for (const threshold of fresh) {
-          if (isCompletionIgnoredCampaign(campaignName) || !slackable.has(threshold)) {
+          if (
+            isCompletionIgnoredCampaign(campaignName) ||
+            !slackable.has(threshold) ||
+            !input.allowSlack
+          ) {
             snapshot.notifiedThresholds.push(threshold);
           }
         }
-        if (!isCompletionIgnoredCampaign(campaignName)) {
+        if (input.allowSlack && !isCompletionIgnoredCampaign(campaignName)) {
           for (const threshold of slackable) {
             input.pendingCompletion.push({
               campaignId: input.campaign.id,
@@ -470,14 +445,15 @@ export class WatchService {
       minSample: this.config.minBounceSample,
     });
     const becamePaused = snapshot.seen && snapshot.status !== "PAUSED" && verdict.paused;
-    if (!firstSeen && becamePaused) {
+    if (input.allowSlack && !firstSeen && becamePaused && verdict.autobounce) {
       const key = `pause:v1:${input.campaign.id}:${input.day}`;
       if (!(await this.alreadySent(key))) {
         await this.notify(
           formatPauseMessage({
             clientName,
             campaignName,
-            autobounce: verdict.autobounce,
+            campaignId: input.campaign.id,
+            autobounce: true,
             bounceRate: verdict.bounceRate,
             sent: verdict.sent,
             reason: verdict.reason,
@@ -487,7 +463,7 @@ export class WatchService {
             campaignId: input.campaign.id,
             clientName,
             campaignName,
-            kind: verdict.autobounce ? "autobounce" : "pause",
+            kind: "autobounce",
             payload: { ...verdict },
           },
         );
@@ -496,94 +472,16 @@ export class WatchService {
       }
     }
 
-    if (input.status === "ACTIVE") {
-      const schedule = parseCampaignSchedule(
-        { ...(unwrap(settings) ?? {}), ...(unwrap(detail) ?? {}) },
-        {
-          timeZone: this.config.sendShortfallTimezone,
-          gapMinutes: this.config.mailboxMinTimeGapMins,
-        },
-      );
-      const sendDay = isSendDay(schedule, input.now);
-      const afterWindow = windowHasEnded(schedule, input.now);
-      if (firstSeen) {
-        snapshot.lastSendingAlertDay = input.day;
-      } else if (!sendDay) {
-        // not a send day
-      } else if (!afterWindow) {
-        input.onPendingDigest();
-      } else if (stats != null) {
-        const accounts = await this.smartlead.getCampaignEmailAccounts(input.campaign.id);
-        const inboxes = classifyInboxes(
-          accounts.map((row) => ({
-            id: row.id,
-            email: row.from_email ?? row.email ?? row.username,
-            smtpOk: row.is_smtp_success !== false,
-            imapOk: row.is_imap_success !== false,
-            dailySent: row.daily_sent_count ?? 0,
-          })),
-        );
-        const todayVolume = parseTodayVolume(
-          await this.smartlead
-            .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
-            .catch(() => null),
-          input.day,
-        );
-        const sentToday = todayVolume.sent;
-        const diagnosis = diagnoseSending({
-          sent: sentToday,
-          remaining: stats.remaining,
-          schedule,
-          inboxes,
-          messagePerDay: this.config.messagePerDay,
-        });
-        input.digestRows.push({
-          clientId,
-          clientName,
-          campaignName,
-          sent: sentToday,
-          bounced: todayVolume.bounced,
-          remaining: stats.remaining,
-          notStarted: stats.notStarted,
-          inProgress: stats.inProgress,
-          staffable: inboxes.staffable,
-          attached: inboxes.attached,
-          kind: diagnosis?.kind ?? "unknown",
-          shouldAlert: Boolean(diagnosis?.shouldAlert),
-          status: "ACTIVE",
-        });
-        if (diagnosis?.shouldAlert) input.result.sending += 1;
-      }
-    } else if (input.status === "PAUSED" && stats) {
-      const todayVolume = parseTodayVolume(
-        await this.smartlead
-          .getCampaignAnalyticsByDate(input.campaign.id, input.day, input.day)
-          .catch(() => null),
-        input.day,
-      );
-      input.digestRows.push({
-        clientId,
-        clientName,
-        campaignName,
-        sent: todayVolume.sent,
-        bounced: todayVolume.bounced,
-        remaining: stats.remaining,
-        notStarted: stats.notStarted,
-        inProgress: stats.inProgress,
-        staffable: 0,
-        attached: 0,
-        kind: "unknown",
-        shouldAlert: false,
-        status: "PAUSED",
-      });
-    }
-
     snapshot.status = input.status;
     snapshot.seen = true;
     this.state.put(input.campaign.id, snapshot);
   }
 
-  private async inspectHeyReach(day: string, result: WatchResult): Promise<void> {
+  private async inspectHeyReach(
+    day: string,
+    result: WatchResult,
+    allowSlack: boolean,
+  ): Promise<void> {
     if (!this.heyreachClients.length) return;
     const lookback = Math.max(1, this.config.heyreachPaceLookbackDays);
     const startDay = addUtcDays(day, -lookback + 1);
@@ -608,6 +506,7 @@ export class WatchService {
             day,
             startDay,
             result,
+            allowSlack,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -625,6 +524,7 @@ export class WatchService {
     day: string;
     startDay: string;
     result: WatchResult;
+    allowSlack: boolean;
   }): Promise<void> {
     const workspaceId = input.client.workspace.id;
     const clientName = input.client.workspace.clientName;
@@ -695,11 +595,21 @@ export class WatchService {
     const freshDry = flags.pendingDry && !snapshot.notifiedPendingDry;
     const actionable = shouldAlertHeyReach(flags) && (freshUnder7 || freshDry);
 
+    if (actionable && !input.allowSlack) {
+      snapshot.notifiedUnder7 = flags.under7 || snapshot.notifiedUnder7;
+      snapshot.notifiedPendingDry = flags.pendingDry || snapshot.notifiedPendingDry;
+      snapshot.seen = true;
+      this.state.putHeyreach(workspaceId, input.campaign.id, snapshot);
+      return;
+    }
+
     if (actionable) {
       const kinds: Array<"under7" | "pending-dry"> = [];
       if (freshUnder7) kinds.push("under7");
       if (freshDry) kinds.push("pending-dry");
-      const already = await Promise.all(kinds.map((kind) => this.alreadySent(heyreachAlertKey(kind, input.campaign.id))));
+      const already = await Promise.all(
+        kinds.map((kind) => this.alreadySent(heyreachAlertKey(kind, input.campaign.id))),
+      );
       const open = kinds.filter((_, index) => !already[index]);
       if (open.length) {
         const text = formatHeyReachRunwayMessage({
@@ -762,7 +672,6 @@ export class WatchService {
   private async flushCompletionAlerts(
     pending: PendingCompletion[],
     inventory: ClientCampaignLeadRow[],
-    _now: Date,
     result: WatchResult,
   ): Promise<void> {
     for (const item of pending) {
@@ -849,4 +758,3 @@ export class WatchService {
     }
   }
 }
-
