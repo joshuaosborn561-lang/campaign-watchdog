@@ -1,5 +1,9 @@
 import type { AppConfig } from "../config.js";
-import { HeyReachClient } from "../clients/heyreach.js";
+import {
+  HeyReachClient,
+  parseProgressStats,
+  type HeyReachCampaign,
+} from "../clients/heyreach.js";
 import {
   SmartleadClient,
   sleep,
@@ -9,10 +13,22 @@ import {
 import type { SlackClient } from "../clients/slack.js";
 import type { CampaignNameRow, SupabaseStore } from "../clients/supabase.js";
 import { detectAutobounce } from "../lib/autobounce.js";
-import { parseCampaignLeadStats } from "../lib/completion.js";
-import { formatPauseMessage } from "../lib/digest.js";
+import {
+  clientHasOtherActiveLeads,
+  completionAlertsToPost,
+  completionPercent,
+  newThresholds,
+  parseCampaignLeadStats,
+  thresholdsReached,
+  type ClientCampaignLeadRow,
+} from "../lib/completion.js";
+import {
+  formatFinishedMessage,
+  formatNearlyDoneMessage,
+  formatPauseMessage,
+} from "../lib/digest.js";
 import { isSendDay, parseCampaignSchedule } from "../lib/schedule.js";
-import { isNoiseCampaign } from "../lib/names.js";
+import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
 import { resolveClient } from "../lib/clients.js";
 import { parseTodayVolume } from "../lib/pulse.js";
 import {
@@ -26,6 +42,18 @@ import {
   type VolumeCampaignInput,
 } from "../lib/volume.js";
 import { unwrap } from "../lib/parse.js";
+import {
+  addUtcDays,
+  formatHeyReachRunwayMessage,
+  heyreachAlertFlags,
+  heyreachAlertKey,
+  heyreachRemaining,
+  isoDayEnd,
+  isoDayStart,
+  runwayDays,
+  shouldAlertHeyReach,
+  weekdayPaceFromStats,
+} from "../lib/heyreach.js";
 import { isWeekendInZone, ymdInZone } from "../lib/time.js";
 import type { StateStore } from "../state/store.js";
 
@@ -46,20 +74,36 @@ export type HeyReachWorkspaceClient = Pick<
   "workspace" | "listCampaigns" | "getCampaign" | "getOverallStats"
 >;
 
+interface PendingCompletion {
+  campaignId: number;
+  clientId: number | null;
+  clientName: string;
+  campaignName: string;
+  threshold: number;
+  percent: number;
+  remaining: number;
+  contacted: number;
+  total: number;
+}
+
 export class WatchService {
+  private readonly heyreachClients: HeyReachWorkspaceClient[];
+
   constructor(
     private readonly config: AppConfig,
     private readonly smartlead: SmartleadClient,
     private readonly slack: SlackClient,
     private readonly state: StateStore,
     private readonly supabase: SupabaseStore,
-    _heyreachClients?: HeyReachWorkspaceClient[],
-  ) {}
+    heyreachClients?: HeyReachWorkspaceClient[],
+  ) {
+    this.heyreachClients =
+      heyreachClients ?? config.heyreachWorkspaces.map((workspace) => new HeyReachClient(workspace));
+  }
 
   /**
-   * 15-minute watch. The only Slack it may send is an immediate autobounce
-   * pause (weekdays). Completion, digest, pulse, sending, and HeyReach
-   * never post from this loop.
+   * 15-minute watch. Weekday Slack: autobounce pauses, 75/90/100 completion,
+   * and HeyReach runway / pending-dry. No digest, pulse, or weekend posts.
    */
   async run(now = new Date()): Promise<WatchResult> {
     const result: WatchResult = {
@@ -77,6 +121,8 @@ export class WatchService {
     const clientsById = new Map(clients.map((client) => [client.id, client]));
     const watch = new Set(this.config.watchStatuses);
     const day = ymdInZone(now, this.config.sendShortfallTimezone);
+    const inventory: ClientCampaignLeadRow[] = [];
+    const pendingCompletion: PendingCompletion[] = [];
 
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
@@ -93,6 +139,8 @@ export class WatchService {
           day,
           allowSlack,
           result,
+          inventory,
+          pendingCompletion,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -101,6 +149,10 @@ export class WatchService {
       await sleep(150);
     }
 
+    if (allowSlack) {
+      await this.flushCompletionAlerts(pendingCompletion, inventory, result);
+    }
+    await this.inspectHeyReach(day, result, allowSlack);
     await this.state.save();
     return result;
   }
@@ -300,14 +352,18 @@ export class WatchService {
     day: string;
     allowSlack: boolean;
     result: WatchResult;
+    inventory: ClientCampaignLeadRow[];
+    pendingCompletion: PendingCompletion[];
   }): Promise<void> {
     const snapshot = this.state.snapshot(input.campaign.id);
     const firstSeen = !snapshot.seen;
+    const campaignName = input.campaign.name;
 
-    const [detail, settings, analytics] = await Promise.all([
+    const [detail, settings, analytics, statistics] = await Promise.all([
       this.smartlead.getCampaign(input.campaign.id).catch(() => input.campaign),
       this.smartlead.getCampaignSettings(input.campaign.id).catch(() => null),
       this.smartlead.getCampaignAnalytics(input.campaign.id).catch(() => null),
+      this.smartlead.getCampaignStatistics(input.campaign.id).catch(() => null),
     ]);
 
     const resolved = resolveClient(
@@ -317,6 +373,68 @@ export class WatchService {
       input.registry,
       detail,
     );
+    const clientName = resolved.clientName;
+    const clientId = resolved.clientId;
+    const inventoryRow: ClientCampaignLeadRow = {
+      id: input.campaign.id,
+      clientId,
+      clientName,
+      campaignName,
+      status: input.status,
+      remaining: null,
+    };
+    input.inventory.push(inventoryRow);
+
+    const stats =
+      parseCampaignLeadStats(analytics) ??
+      parseCampaignLeadStats(statistics) ??
+      parseCampaignLeadStats(detail);
+
+    if (stats) {
+      const percent = completionPercent(stats);
+      snapshot.lastCompletionPct = percent;
+      inventoryRow.remaining = stats.remaining;
+      if (firstSeen) {
+        snapshot.notifiedThresholds = thresholdsReached(
+          percent,
+          this.config.completionThresholds,
+        );
+      } else {
+        const fresh = newThresholds(
+          percent,
+          snapshot.notifiedThresholds,
+          this.config.completionThresholds,
+        );
+        const slackable = new Set(completionAlertsToPost(fresh, percent));
+        // Record 50% (and anything we will not Slack) now. On weekdays,
+        // 75/90/100 stay pending until Slack succeeds. On weekends they
+        // are marked here so Monday does not catch up.
+        for (const threshold of fresh) {
+          if (
+            isCompletionIgnoredCampaign(campaignName) ||
+            !slackable.has(threshold) ||
+            !input.allowSlack
+          ) {
+            snapshot.notifiedThresholds.push(threshold);
+          }
+        }
+        if (input.allowSlack && !isCompletionIgnoredCampaign(campaignName)) {
+          for (const threshold of slackable) {
+            input.pendingCompletion.push({
+              campaignId: input.campaign.id,
+              clientId,
+              clientName,
+              campaignName,
+              threshold,
+              percent,
+              remaining: stats.remaining,
+              contacted: stats.contacted,
+              total: stats.total,
+            });
+          }
+        }
+      }
+    }
 
     const verdict = detectAutobounce({
       status: input.status,
@@ -332,8 +450,8 @@ export class WatchService {
       if (!(await this.alreadySent(key))) {
         await this.notify(
           formatPauseMessage({
-            clientName: resolved.clientName,
-            campaignName: input.campaign.name,
+            clientName,
+            campaignName,
             campaignId: input.campaign.id,
             autobounce: true,
             bounceRate: verdict.bounceRate,
@@ -343,8 +461,8 @@ export class WatchService {
           {
             key,
             campaignId: input.campaign.id,
-            clientName: resolved.clientName,
-            campaignName: input.campaign.name,
+            clientName,
+            campaignName,
             kind: "autobounce",
             payload: { ...verdict },
           },
@@ -357,6 +475,257 @@ export class WatchService {
     snapshot.status = input.status;
     snapshot.seen = true;
     this.state.put(input.campaign.id, snapshot);
+  }
+
+  private async inspectHeyReach(
+    day: string,
+    result: WatchResult,
+    allowSlack: boolean,
+  ): Promise<void> {
+    if (!this.heyreachClients.length) return;
+    const lookback = Math.max(1, this.config.heyreachPaceLookbackDays);
+    const startDay = addUtcDays(day, -lookback + 1);
+    for (const client of this.heyreachClients) {
+      let campaigns: HeyReachCampaign[] = [];
+      try {
+        campaigns = await client.listCampaigns(["IN_PROGRESS"]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        result.errors.push(`heyreach ${client.workspace.id}: ${message}`);
+        continue;
+      }
+      for (const campaign of campaigns) {
+        const status = String(campaign.status ?? "").toUpperCase();
+        if (status !== "IN_PROGRESS") continue;
+        result.scanned += 1;
+        try {
+          await this.inspectHeyReachCampaign({
+            client,
+            campaign,
+            status,
+            day,
+            startDay,
+            result,
+            allowSlack,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          result.errors.push(`heyreach ${client.workspace.id} #${campaign.id}: ${message}`);
+        }
+        await sleep(150);
+      }
+    }
+  }
+
+  private async inspectHeyReachCampaign(input: {
+    client: HeyReachWorkspaceClient;
+    campaign: HeyReachCampaign;
+    status: string;
+    day: string;
+    startDay: string;
+    result: WatchResult;
+    allowSlack: boolean;
+  }): Promise<void> {
+    const workspaceId = input.client.workspace.id;
+    const clientName = input.client.workspace.clientName;
+    const snapshot = this.state.heyreachSnapshot(workspaceId, input.campaign.id);
+    const firstSeen = !snapshot.seen;
+
+    let stats = input.campaign.progressStats;
+    if (!stats) {
+      const detail = await input.client.getCampaign(input.campaign.id).catch(() => null);
+      stats = parseProgressStats(
+        unwrap(detail)?.progressStats ?? unwrap(detail)?.progress_stats ?? detail,
+      );
+    }
+    const pending = stats?.pending ?? 0;
+    const inProgress = stats?.inProgress ?? 0;
+    const remaining = heyreachRemaining({ pending, inProgress });
+    const total = stats?.total ?? remaining;
+
+    let weekdayPace: number | null = null;
+    let weekdaySamples = 0;
+    try {
+      const raw = await input.client.getOverallStats({
+        campaignId: input.campaign.id,
+        startDate: isoDayStart(input.startDay),
+        endDate: isoDayEnd(input.day),
+      });
+      const pace = weekdayPaceFromStats(raw, this.config.heyreachWeekdays);
+      weekdayPace = pace.pace;
+      weekdaySamples = pace.samples;
+    } catch (error) {
+      console.warn(
+        `[watchdog] heyreach #${input.campaign.id} stats:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+
+    const daysLeft = runwayDays(remaining, weekdayPace);
+    const flags = heyreachAlertFlags(
+      {
+        campaignId: input.campaign.id,
+        status: input.status,
+        pending,
+        runwayDays: daysLeft,
+      },
+      {
+        excludeIds: this.config.heyreachExcludeIds,
+        runwayDays: this.config.heyreachRunwayDays,
+      },
+    );
+
+    snapshot.status = input.status;
+    snapshot.lastPending = pending;
+    snapshot.lastRemaining = remaining;
+    snapshot.lastRunwayDays = daysLeft;
+
+    if (firstSeen) {
+      snapshot.notifiedUnder7 = flags.under7;
+      snapshot.notifiedPendingDry = flags.pendingDry;
+      snapshot.seen = true;
+      this.state.putHeyreach(workspaceId, input.campaign.id, snapshot);
+      return;
+    }
+
+    if (!flags.under7) snapshot.notifiedUnder7 = false;
+    if (!flags.pendingDry) snapshot.notifiedPendingDry = false;
+
+    const freshUnder7 = flags.under7 && !snapshot.notifiedUnder7;
+    const freshDry = flags.pendingDry && !snapshot.notifiedPendingDry;
+    const actionable = shouldAlertHeyReach(flags) && (freshUnder7 || freshDry);
+
+    if (actionable && !input.allowSlack) {
+      snapshot.notifiedUnder7 = flags.under7 || snapshot.notifiedUnder7;
+      snapshot.notifiedPendingDry = flags.pendingDry || snapshot.notifiedPendingDry;
+      snapshot.seen = true;
+      this.state.putHeyreach(workspaceId, input.campaign.id, snapshot);
+      return;
+    }
+
+    if (actionable) {
+      const kinds: Array<"under7" | "pending-dry"> = [];
+      if (freshUnder7) kinds.push("under7");
+      if (freshDry) kinds.push("pending-dry");
+      const already = await Promise.all(
+        kinds.map((kind) => this.alreadySent(heyreachAlertKey(kind, input.campaign.id))),
+      );
+      const open = kinds.filter((_, index) => !already[index]);
+      if (open.length) {
+        const text = formatHeyReachRunwayMessage({
+          clientName,
+          campaignName: input.campaign.name,
+          remaining,
+          pending,
+          inProgress,
+          runwayDays: daysLeft,
+          under7: flags.under7,
+          pendingDry: flags.pendingDry,
+        });
+        await this.notify(text, {
+          key: heyreachAlertKey(open[0], input.campaign.id),
+          campaignId: input.campaign.id,
+          clientName,
+          campaignName: input.campaign.name,
+          kind: open[0] === "under7" ? "heyreach_under7" : "heyreach_pending_dry",
+          payload: {
+            workspace: workspaceId,
+            pending,
+            inProgress,
+            remaining,
+            total,
+            weekdayPace,
+            weekdaySamples,
+            runwayDays: daysLeft,
+            under7: flags.under7,
+            pendingDry: flags.pendingDry,
+          },
+        });
+        for (const kind of open.slice(1)) {
+          if (!this.supabase.enabled()) continue;
+          try {
+            await this.supabase.markAlert({
+              key: heyreachAlertKey(kind, input.campaign.id),
+              campaignId: input.campaign.id,
+              clientName,
+              campaignName: input.campaign.name,
+              kind: kind === "under7" ? "heyreach_under7" : "heyreach_pending_dry",
+              payload: { workspace: workspaceId, remaining, pending, runwayDays: daysLeft },
+            });
+          } catch (error) {
+            console.warn("[watchdog] failed to persist heyreach alert key", error);
+          }
+        }
+        snapshot.notifiedUnder7 = flags.under7 || snapshot.notifiedUnder7;
+        snapshot.notifiedPendingDry = flags.pendingDry || snapshot.notifiedPendingDry;
+        input.result.heyreach += 1;
+      } else {
+        snapshot.notifiedUnder7 = flags.under7 || snapshot.notifiedUnder7;
+        snapshot.notifiedPendingDry = flags.pendingDry || snapshot.notifiedPendingDry;
+      }
+    }
+
+    snapshot.seen = true;
+    this.state.putHeyreach(workspaceId, input.campaign.id, snapshot);
+  }
+
+  private async flushCompletionAlerts(
+    pending: PendingCompletion[],
+    inventory: ClientCampaignLeadRow[],
+    result: WatchResult,
+  ): Promise<void> {
+    for (const item of pending) {
+      const key = `completion:v1:${item.campaignId}:${item.threshold}`;
+      if (await this.alreadySent(key)) {
+        this.markThresholdNotified(item.campaignId, item.threshold);
+        continue;
+      }
+      const text =
+        item.threshold >= 100
+          ? formatFinishedMessage({
+              clientName: item.clientName,
+              campaignName: item.campaignName,
+              otherActiveLeads: clientHasOtherActiveLeads(
+                {
+                  id: item.campaignId,
+                  clientId: item.clientId,
+                  clientName: item.clientName,
+                },
+                inventory,
+                isCompletionIgnoredCampaign,
+              ),
+            })
+          : formatNearlyDoneMessage({
+              clientName: item.clientName,
+              campaignName: item.campaignName,
+              threshold: item.threshold,
+              remaining: item.remaining,
+            });
+      await this.notify(text, {
+        key,
+        campaignId: item.campaignId,
+        clientName: item.clientName,
+        campaignName: item.campaignName,
+        kind: "completion",
+        payload: {
+          threshold: item.threshold,
+          percent: item.percent,
+          remaining: item.remaining,
+          contacted: item.contacted,
+          total: item.total,
+        },
+      });
+      this.markThresholdNotified(item.campaignId, item.threshold);
+      result.completion += 1;
+    }
+  }
+
+  private markThresholdNotified(campaignId: number, threshold: number): void {
+    const snapshot = this.state.snapshot(campaignId);
+    if (!snapshot.notifiedThresholds.includes(threshold)) {
+      snapshot.notifiedThresholds.push(threshold);
+    }
+    this.state.put(campaignId, snapshot);
   }
 
   private async alreadySent(key: string): Promise<boolean> {

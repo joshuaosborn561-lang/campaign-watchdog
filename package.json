@@ -1,7 +1,7 @@
 {
   "name": "campaign-watchdog",
   "version": "1.0.0",
-  "description": "Weekday Slack: midday 1,200-send tracking, bounce-protection auto-pauses, and EOD volume plus 7-day email top-up",
+  "description": "Weekday Slack: midday volume, autobounce, 75/90/100, HeyReach runway, and EOD send/top-up",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
