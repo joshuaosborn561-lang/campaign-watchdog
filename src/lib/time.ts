@@ -51,3 +51,40 @@ export function isWeekendInZone(now: Date, timeZone: string): boolean {
   const day = weekdayInZone(now, timeZone);
   return day === 0 || day === 6;
 }
+
+/** Minutes to add to UTC to get wall clock in `timeZone` at `now` (DST-aware). */
+export function utcOffsetMinutes(now: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+  const year = Number(parts.find((part) => part.type === "year")?.value ?? "0");
+  const month = Number(parts.find((part) => part.type === "month")?.value ?? "1");
+  const day = Number(parts.find((part) => part.type === "day")?.value ?? "1");
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "0") % 24;
+  const minute = Number(parts.find((part) => part.type === "minute")?.value ?? "0");
+  const second = Number(parts.find((part) => part.type === "second")?.value ?? "0");
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  return Math.round((asUtc - now.getTime()) / 60_000);
+}
+
+/**
+ * Convert a clock time in `sourceTimeZone` (minutes past midnight) to minutes
+ * past midnight in `targetTimeZone` on the same instant as `now`.
+ */
+export function clockMinutesInZone(
+  clockMinutes: number,
+  sourceTimeZone: string,
+  targetTimeZone: string,
+  now: Date,
+): number {
+  const sourceOffset = utcOffsetMinutes(now, sourceTimeZone);
+  const targetOffset = utcOffsetMinutes(now, targetTimeZone);
+  return clockMinutes - sourceOffset + targetOffset;
+}

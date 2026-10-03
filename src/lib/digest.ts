@@ -171,19 +171,21 @@ export function formatDailyDigest(
 export function formatPauseMessage(input: {
   clientName: string;
   campaignName: string;
+  campaignId?: number;
   autobounce: boolean;
   bounceRate: number | null;
   sent: number | null;
   reason: string;
 }): string {
-  const who = `*${input.clientName}* — *${input.campaignName}*`;
+  const id = input.campaignId != null ? ` \`#${input.campaignId}\`` : "";
+  const who = `*${input.clientName}* — *${input.campaignName}*${id}`;
   if (input.autobounce) {
     const bounce =
       input.bounceRate != null
-        ? `autobounce, ${input.bounceRate.toFixed(1)}% bounce` +
+        ? `${input.bounceRate.toFixed(1)}% bounce` +
           (input.sent != null ? ` on ${input.sent.toLocaleString()} sends` : "")
-        : "Smartlead autobounce";
-    return `${who} paused (${bounce}).`;
+        : "bounce protection";
+    return `${who} auto-paused (${bounce}).`;
   }
   return `${who} paused.`;
 }

@@ -25,6 +25,8 @@ export interface WatchdogState {
   heyreachCampaigns?: Record<string, HeyReachSnapshot>;
   lastDigestDay?: string;
   lastPulseSlot?: string;
+  lastVolumeDay?: string;
+  lastEodDay?: string;
   slack?: {
     access_token?: string;
     refresh_token?: string;
@@ -47,6 +49,8 @@ export class StateStore {
         heyreachCampaigns: parsed.heyreachCampaigns ?? {},
         lastDigestDay: parsed.lastDigestDay,
         lastPulseSlot: parsed.lastPulseSlot,
+        lastVolumeDay: parsed.lastVolumeDay,
+        lastEodDay: parsed.lastEodDay,
         slack: parsed.slack,
       };
     } catch {
@@ -117,5 +121,21 @@ export class StateStore {
 
   setLastPulseSlot(slot: string): void {
     this.state.lastPulseSlot = slot;
+  }
+
+  lastVolumeDay(): string | undefined {
+    return this.state.lastVolumeDay;
+  }
+
+  setLastVolumeDay(day: string): void {
+    this.state.lastVolumeDay = day;
+  }
+
+  lastEodDay(): string | undefined {
+    return this.state.lastEodDay;
+  }
+
+  setLastEodDay(day: string): void {
+    this.state.lastEodDay = day;
   }
 }

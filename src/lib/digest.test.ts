@@ -324,13 +324,14 @@ describe("digest", () => {
     const text = formatPauseMessage({
       clientName: "Goliath Cybersecurity",
       campaignName: "Goliath Displacement S 50-200 CIO",
+      campaignId: 88,
       autobounce: true,
       bounceRate: 8.2,
       sent: 195,
       reason: "bounce",
     });
-    assert.match(text, /\*Goliath Cybersecurity\* — \*Goliath Displacement S 50-200 CIO\*/);
-    assert.match(text, /paused \(autobounce, 8\.2% bounce on 195 sends\)/);
+    assert.match(text, /\*Goliath Cybersecurity\* — \*Goliath Displacement S 50-200 CIO\* `#88`/);
+    assert.match(text, /auto-paused \(8\.2% bounce on 195 sends\)/);
     assert.match(
       formatFinishedMessage({
         clientName: "Vasco Warranty",

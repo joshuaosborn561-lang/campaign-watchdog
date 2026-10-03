@@ -31,14 +31,31 @@ async function main(): Promise<void> {
   const watch = new WatchService(config, smartlead, slack, state, supabase);
 
   let running = false;
-  let pulseQueued: { reason: string; firedAt: Date } | null = null;
+  let queued: { kind: "midday" | "eod"; reason: string; firedAt: Date } | null = null;
 
-  const drainPulse = () => {
+  const persistTokens = async () => {
+    const tokens = slack.tokenBundle();
+    state.setSlackTokens({
+      access_token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
+    });
+    if (supabase.enabled() && tokens.refreshToken) {
+      await supabase
+        .writeSlackTokens({
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+        })
+        .catch((error) => console.warn("[watchdog] slack token persist failed", error));
+    }
+  };
+
+  const drainQueued = () => {
     running = false;
-    if (!pulseQueued) return;
-    const queued = pulseQueued;
-    pulseQueued = null;
-    void runPulse(queued.reason, queued.firedAt);
+    if (!queued) return;
+    const job = queued;
+    queued = null;
+    if (job.kind === "midday") void runMidday(job.reason, job.firedAt);
+    else void runEod(job.reason, job.firedAt);
   };
 
   const runOnce = async (reason: string) => {
@@ -51,20 +68,10 @@ async function main(): Promise<void> {
     try {
       await state.load();
       const result = await watch.run();
-      const tokens = slack.tokenBundle();
-      state.setSlackTokens({
-        access_token: tokens.accessToken,
-        refresh_token: tokens.refreshToken,
-      });
-      if (supabase.enabled() && tokens.refreshToken) {
-        await supabase.writeSlackTokens({
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-        }).catch((error) => console.warn("[watchdog] slack token persist failed", error));
-      }
+      await persistTokens();
       await state.save();
       console.log(
-        `[watchdog] ${reason} scanned=${result.scanned} completion=${result.completion} autobounce=${result.autobounce} sending=${result.sending} digest=${result.digest} heyreach=${result.heyreach} errors=${result.errors.length} ${Date.now() - started}ms`,
+        `[watchdog] ${reason} scanned=${result.scanned} autobounce=${result.autobounce} errors=${result.errors.length} ${Date.now() - started}ms`,
       );
       if (result.errors.length) {
         console.warn("[watchdog] errors", result.errors.slice(0, 20));
@@ -72,8 +79,56 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error("[watchdog] run failed", error);
     } finally {
-      drainPulse();
+      drainQueued();
     }
+  };
+
+  const runMidday = async (reason: string, firedAt = new Date()) => {
+    if (running) {
+      queued = { kind: "midday", reason, firedAt };
+      console.log(`[watchdog] queue ${reason}: watch busy`);
+      return;
+    }
+    running = true;
+    try {
+      await state.load();
+      const volume = await watch.runVolumeCheck(firedAt);
+      console.log(
+        `[watchdog] ${reason} posted=${volume.posted} clients=${volume.clients} flagged=${volume.flagged}`,
+      );
+    } catch (error) {
+      console.error("[watchdog] midday failed", error);
+    } finally {
+      drainQueued();
+    }
+  };
+
+  const runEod = async (reason: string, firedAt = new Date()) => {
+    if (running) {
+      queued = { kind: "eod", reason, firedAt };
+      console.log(`[watchdog] queue ${reason}: watch busy`);
+      return;
+    }
+    running = true;
+    try {
+      await state.load();
+      const eod = await watch.runEndOfDay(firedAt);
+      console.log(
+        `[watchdog] ${reason} posted=${eod.posted} clients=${eod.clients} under=${eod.under} topUp=${eod.topUp}`,
+      );
+    } catch (error) {
+      console.error("[watchdog] eod failed", error);
+    } finally {
+      drainQueued();
+    }
+  };
+
+  const authorize = (req: express.Request, res: express.Response): boolean => {
+    if (config.runToken && req.header("x-run-token") !== config.runToken) {
+      res.status(401).json({ ok: false, error: "unauthorized" });
+      return false;
+    }
+    return true;
   };
 
   const app = express();
@@ -81,40 +136,18 @@ async function main(): Promise<void> {
     res.json({ ok: true, service: "campaign-watchdog" });
   });
   app.post("/run", async (req, res) => {
-    if (config.runToken && req.header("x-run-token") !== config.runToken) {
-      res.status(401).json({ ok: false, error: "unauthorized" });
-      return;
-    }
+    if (!authorize(req, res)) return;
     await runOnce("manual");
     res.json({ ok: true });
   });
-
-  const runPulse = async (reason: string, firedAt = new Date()) => {
-    if (running) {
-      pulseQueued = { reason, firedAt };
-      console.log(`[watchdog] queue ${reason}: watch busy`);
-      return;
-    }
-    running = true;
-    try {
-      await state.load();
-      const pulse = await watch.runPulse(firedAt);
-      console.log(
-        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} paused=${pulse.paused}`,
-      );
-    } catch (error) {
-      console.error("[watchdog] pulse failed", error);
-    } finally {
-      drainPulse();
-    }
-  };
-
-  app.post("/pulse", async (req, res) => {
-    if (config.runToken && req.header("x-run-token") !== config.runToken) {
-      res.status(401).json({ ok: false, error: "unauthorized" });
-      return;
-    }
-    await runPulse("manual-pulse");
+  app.post("/midday", async (req, res) => {
+    if (!authorize(req, res)) return;
+    await runMidday("manual-midday");
+    res.json({ ok: true });
+  });
+  app.post("/eod", async (req, res) => {
+    if (!authorize(req, res)) return;
+    await runEod("manual-eod");
     res.json({ ok: true });
   });
 
@@ -130,9 +163,16 @@ async function main(): Promise<void> {
     { timezone: config.sendShortfallTimezone },
   );
   cron.schedule(
-    config.pulseCron,
+    config.volumeCron,
     () => {
-      void runPulse("pulse", new Date());
+      void runMidday("midday", new Date());
+    },
+    { timezone: config.sendShortfallTimezone },
+  );
+  cron.schedule(
+    config.eodCron,
+    () => {
+      void runEod("eod", new Date());
     },
     { timezone: config.sendShortfallTimezone },
   );
