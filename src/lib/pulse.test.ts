@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  attachPulseUnder,
   classifyPulseOffTrack,
   classifyPulseShortfall,
+  DEFAULT_SLACK_CAYDEN_USER_ID,
+  DEFAULT_SLACK_JOSH_USER_ID,
   formatClientPulse,
+  formatUnderMentionLine,
   isPulseExcludedCampaign,
   isPulseWindow,
   parseTodayVolume,
@@ -60,6 +64,75 @@ describe("client pulse", () => {
     assert.match(text, /\*Culture Fits\* — 0 sent/);
     assert.match(text, /Total 145 sent · 4\.1% bounce/);
     assert.doesNotMatch(text, /Paused/);
+    assert.doesNotMatch(text, /<@/);
+    assert.doesNotMatch(text, /\*under\*/);
+  });
+
+  it("flags *under* and mentions Cayden + Josh only when a client is under", () => {
+    const mentions = [DEFAULT_SLACK_CAYDEN_USER_ID, DEFAULT_SLACK_JOSH_USER_ID];
+    const clean = formatClientPulse({
+      day: "2026-09-01",
+      hour: 10,
+      bounceWarn: 5,
+      mentionUserIds: mentions,
+      clients: [
+        { clientName: "Bolder Cyber Partners", sent: 400, bounced: 2 },
+        { clientName: "Vasco Warranty", sent: 200, bounced: 0 },
+      ],
+    });
+    assert.match(clean, /Tue 9\/1 10:00am — sent today/);
+    assert.doesNotMatch(clean, /<@/);
+    assert.doesNotMatch(clean, /\*under\*/);
+
+    const under = formatClientPulse({
+      day: "2026-09-01",
+      hour: 10,
+      bounceWarn: 5,
+      mentionUserIds: mentions,
+      clients: [
+        { clientName: "Bolder Cyber Partners", sent: 400, bounced: 2 },
+        { clientName: "Vasco Warranty", sent: 80, bounced: 0, under: true },
+      ],
+    });
+    assert.equal(
+      under.split("\n")[0],
+      `<@${DEFAULT_SLACK_CAYDEN_USER_ID}> <@${DEFAULT_SLACK_JOSH_USER_ID}>`,
+    );
+    assert.match(under, /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\*/);
+    assert.match(under, /\*Bolder Cyber Partners\* — 400 sent · 0\.5% bounce$/m);
+    assert.doesNotMatch(under, /too few leads/);
+    assert.doesNotMatch(under, /Off track/);
+    assert.doesNotMatch(under, /Refill soon/);
+  });
+
+  it("does not @ anyone for under when mention ids are missing", () => {
+    const text = formatClientPulse({
+      day: "2026-09-01",
+      hour: 10,
+      bounceWarn: 5,
+      clients: [{ clientName: "Vasco Warranty", sent: 0, bounced: 0, under: true }],
+    });
+    assert.match(text, /\*Vasco Warranty\* — 0 sent · \*under\*/);
+    assert.doesNotMatch(text, /<@/);
+  });
+
+  it("copies volume *under* onto the matching client pulse row", () => {
+    const clients = attachPulseUnder(
+      [
+        { clientId: 542838, clientName: "Bolder Cyber Partners", sent: 400, bounced: 0 },
+        { clientId: 548609, clientName: "Vasco Warranty", sent: 80, bounced: 0 },
+      ],
+      [
+        { clientId: 542838, clientName: "Bolder Cyber Partners", under: false },
+        { clientId: 548609, clientName: "Vasco Warranty", under: true },
+      ],
+    );
+    assert.equal(clients[0].under, false);
+    assert.equal(clients[1].under, true);
+    assert.equal(
+      formatUnderMentionLine([DEFAULT_SLACK_CAYDEN_USER_ID, DEFAULT_SLACK_JOSH_USER_ID]),
+      `<@${DEFAULT_SLACK_CAYDEN_USER_ID}> <@${DEFAULT_SLACK_JOSH_USER_ID}>`,
+    );
   });
 
   it("counts paused campaigns without naming them", () => {

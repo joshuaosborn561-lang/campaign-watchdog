@@ -10,7 +10,15 @@ export interface ClientPulse {
   clientName: string;
   sent: number;
   bounced: number;
+  /** Projected send shortfall — same band as midday/EOD `*under*`. */
+  under?: boolean;
 }
+
+/** Cayden in #campaign-watchdog. Override with SLACK_CAYDEN_USER_ID. */
+export const DEFAULT_SLACK_CAYDEN_USER_ID = "U0BL8JT75KN";
+
+/** Josh (owner) — Joshua Osborn. Override with SLACK_JOSH_USER_ID. */
+export const DEFAULT_SLACK_JOSH_USER_ID = "U0AAX2XFJE7";
 
 export interface OffTrackPulseRow {
   clientName: string;
@@ -94,6 +102,29 @@ export function stillPausedCampaigns<T extends { id?: number; name: string; stat
       !isNoiseCampaign(campaign.name) &&
       !isPulseExcludedCampaign(campaign, exclude),
   );
+}
+
+export function slackMention(userId: string): string {
+  const id = userId.trim().replace(/^<@/, "").replace(/>$/, "");
+  return id ? `<@${id}>` : "";
+}
+
+/** `<@Cayden> <@Josh>` line. Empty if no ids. */
+export function formatUnderMentionLine(userIds: Iterable<string>): string | null {
+  const mentions = [...new Set([...userIds].map(slackMention).filter(Boolean))];
+  return mentions.length ? mentions.join(" ") : null;
+}
+
+/** Copy `*under*` from volume rollup onto the sent-today client lines. */
+export function attachPulseUnder(
+  clients: ClientPulse[],
+  volumeRows: Array<{ clientId?: number | null; clientName: string; under: boolean }>,
+): ClientPulse[] {
+  const underByKey = new Map(volumeRows.map((row) => [clientGroupKey(row), row.under]));
+  return clients.map((row) => ({
+    ...row,
+    under: underByKey.get(clientGroupKey(row)) ?? false,
+  }));
 }
 
 export function rollupClientPulse(
@@ -354,10 +385,16 @@ export function formatClientPulse(input: {
   pausedToday?: PausedPulseRow[];
   offTrack?: OffTrackPulseRow[];
   exclude?: PulseExclude;
+  mentionUserIds?: Iterable<string>;
 }): string {
   const totalSent = input.clients.reduce((sum, row) => sum + row.sent, 0);
   const totalBounced = input.clients.reduce((sum, row) => sum + row.bounced, 0);
-  const lines = [`*${formatStamp(input.day, input.hour)} — sent today*`];
+  const lines: string[] = [];
+  if (input.clients.some((row) => row.under)) {
+    const mentions = formatUnderMentionLine(input.mentionUserIds ?? []);
+    if (mentions) lines.push(mentions);
+  }
+  lines.push(`*${formatStamp(input.day, input.hour)} — sent today*`);
   for (const row of input.clients) {
     lines.push(`*${row.clientName}* — ${formatClientLine(row, input.bounceWarn)}`);
   }
@@ -412,13 +449,19 @@ function formatPulseCampaign(row: {
 }
 
 function formatClientLine(row: ClientPulse, bounceWarn: number): string {
+  const bits: string[] = [];
   if (row.sent <= 0) {
-    return "0 sent";
+    bits.push("0 sent");
+  } else {
+    bits.push(`${row.sent.toLocaleString()} sent`);
+    const pct = bouncePercent(row.sent, row.bounced);
+    if (pct != null) {
+      const label = `${formatPct(pct)} bounce`;
+      bits.push(pct + 1e-9 >= bounceWarn ? `*${label}*` : label);
+    }
   }
-  const pct = bouncePercent(row.sent, row.bounced);
-  if (pct == null) return `${row.sent.toLocaleString()} sent`;
-  const label = `${formatPct(pct)} bounce`;
-  return `${row.sent.toLocaleString()} sent · ${pct + 1e-9 >= bounceWarn ? `*${label}*` : label}`;
+  if (row.under) bits.push("*under*");
+  return bits.join(" · ");
 }
 
 function formatPct(value: number): string {

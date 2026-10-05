@@ -6,10 +6,13 @@ import {
   DEFAULT_VOLUME_WEEKDAYS,
   VOLUME_ALERT_MAX,
   VOLUME_TARGET_SENDS,
+  countLowLeadCampaigns,
   emailDaysLeft,
   flagUnderVolume,
   formatEodReport,
+  formatLowOnLeadsLines,
   formatMiddayReport,
+  isLowLeadCampaign,
   isVolumeSkippedCampaign,
   needsEmailTopUp,
   projectDayTotal,
@@ -34,6 +37,7 @@ function volumeRow(partial: Partial<ClientVolumeRow> & Pick<ClientVolumeRow, "cl
     daysLeft: partial.daysLeft ?? null,
     under: partial.under ?? partial.projected < VOLUME_ALERT_MAX,
     needsTopUp: partial.needsTopUp ?? false,
+    lowLeadCampaigns: partial.lowLeadCampaigns ?? 0,
     fraction: partial.fraction ?? 1 / 3,
     startMinutes: partial.startMinutes ?? 540,
     endMinutes: partial.endMinutes ?? 1080,
@@ -306,10 +310,63 @@ describe("end-of-day volume", () => {
     const text = formatEodReport(rows, "2026-09-01");
     assert.match(text ?? "", /\*EOD — Tue 9\/1\*/);
     assert.match(text ?? "", /• \*Goliath\* `#1` — 1,180 \/ 1,200/);
-    assert.match(
-      text ?? "",
-      /• \*Vasco Warranty\* `#2` — 720 \/ 1,200 · \*under\* · \*~4\.2d left, needs top-up\*/,
+    assert.match(text ?? "", /• \*Vasco Warranty\* `#2` — 720 \/ 1,200 · \*under\*$/m);
+    assert.match(text ?? "", /• \*Vasco Warranty\* — 1 low on leads/);
+    assert.doesNotMatch(text ?? "", /Goliath.*low on leads/);
+    assert.doesNotMatch(text ?? "", /needs top-up/);
+    assert.doesNotMatch(text ?? "", /Refill soon/);
+    assert.doesNotMatch(text ?? "", /`#2` — 1 low/);
+  });
+
+  it("counts low-on-leads lists per client and omits clients at zero", () => {
+    assert.equal(isLowLeadCampaign(5000), true);
+    assert.equal(isLowLeadCampaign(8400), false);
+    assert.equal(isLowLeadCampaign(null), false);
+    assert.equal(countLowLeadCampaigns([5000, 1000, 20000, null]), 2);
+    assert.deepEqual(
+      formatLowOnLeadsLines([
+        { clientName: "Bolder Cyber Partners", lowLeadCampaigns: 3 },
+        { clientName: "On Track", lowLeadCampaigns: 0 },
+        { clientName: "Vasco Warranty", lowLeadCampaigns: 1 },
+      ]),
+      [
+        "• *Bolder Cyber Partners* — 3 low on leads",
+        "• *Vasco Warranty* — 1 low on leads",
+      ],
     );
+  });
+
+  it("rolls EOD low-on-leads as campaign counts, not a client-sum essay", () => {
+    const rows = rollupClientEod([
+      {
+        clientId: 542838,
+        clientName: "Bolder Cyber Partners",
+        sent: 400,
+        remaining: 4000,
+        schedule: schedule(),
+      },
+      {
+        clientId: 542838,
+        clientName: "Bolder Cyber Partners",
+        sent: 400,
+        remaining: 3000,
+        schedule: schedule(),
+      },
+      {
+        clientId: 542838,
+        clientName: "Bolder Cyber Partners",
+        sent: 380,
+        remaining: 20000,
+        schedule: schedule(),
+      },
+    ]);
+    assert.equal(rows[0].lowLeadCampaigns, 2);
+    assert.equal(rows[0].needsTopUp, true);
+    const text = formatEodReport(rows, "2026-09-01");
+    assert.match(text ?? "", /• \*Bolder Cyber Partners\* `#542838` — 1,180 \/ 1,200/);
+    assert.match(text ?? "", /• \*Bolder Cyber Partners\* — 2 low on leads/);
+    assert.doesNotMatch(text ?? "", /Healthcare/);
+    assert.doesNotMatch(text ?? "", /~.*d left/);
   });
 
   it("only resolves weekday 5–6pm CT, never Sat/Sun or later catch-up", () => {

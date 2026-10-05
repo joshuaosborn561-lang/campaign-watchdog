@@ -48,6 +48,8 @@ export interface ClientVolumeRow {
   daysLeft: number | null;
   under: boolean;
   needsTopUp: boolean;
+  /** ACTIVE lists whose remaining / 1,200-send days is under EMAIL_RUNWAY_DAYS. */
+  lowLeadCampaigns: number;
   fraction: number;
   startMinutes: number;
   endMinutes: number;
@@ -92,6 +94,37 @@ export function needsEmailTopUp(
   minDays = EMAIL_RUNWAY_DAYS,
 ): boolean {
   return daysLeft != null && daysLeft < minDays;
+}
+
+export function isLowLeadCampaign(
+  remaining: number | null | undefined,
+  dailyTarget = VOLUME_TARGET_SENDS,
+  minDays = EMAIL_RUNWAY_DAYS,
+): boolean {
+  return needsEmailTopUp(emailDaysLeft(remaining, dailyTarget), minDays);
+}
+
+export function countLowLeadCampaigns(
+  remainings: Array<number | null | undefined>,
+  dailyTarget = VOLUME_TARGET_SENDS,
+  minDays = EMAIL_RUNWAY_DAYS,
+): number {
+  return remainings.filter((remaining) => isLowLeadCampaign(remaining, dailyTarget, minDays))
+    .length;
+}
+
+/** `• *BCP* — 3 low on leads` — clients with zero are omitted. */
+export function formatLowOnLeadsLines(
+  rows: Array<{ clientName: string; lowLeadCampaigns?: number }>,
+): string[] {
+  return [...rows]
+    .filter((row) => (row.lowLeadCampaigns ?? 0) > 0)
+    .sort(
+      (a, b) =>
+        (b.lowLeadCampaigns ?? 0) - (a.lowLeadCampaigns ?? 0) ||
+        a.clientName.localeCompare(b.clientName),
+    )
+    .map((row) => `• *${row.clientName}* — ${row.lowLeadCampaigns} low on leads`);
 }
 
 function sumRemaining(values: Array<number | null | undefined>): number | null {
@@ -189,6 +222,7 @@ export function rollupClientVolume(
     const projected = projectDayTotal(group.sent, fraction);
     const remaining = sumRemaining(group.remainings);
     const daysLeft = emailDaysLeft(remaining);
+    const lowLeadCampaigns = countLowLeadCampaigns(group.remainings);
     out.push({
       clientId: group.clientId,
       clientName: group.clientName,
@@ -197,7 +231,8 @@ export function rollupClientVolume(
       remaining,
       daysLeft,
       under: projected < VOLUME_ALERT_MAX,
-      needsTopUp: needsEmailTopUp(daysLeft),
+      needsTopUp: lowLeadCampaigns > 0,
+      lowLeadCampaigns,
       fraction,
       startMinutes: window.start,
       endMinutes: window.end,
@@ -237,6 +272,7 @@ export function rollupClientEod(
   for (const group of groups.values()) {
     const remaining = sumRemaining(group.remainings);
     const daysLeft = emailDaysLeft(remaining, target);
+    const lowLeadCampaigns = countLowLeadCampaigns(group.remainings, target);
     out.push({
       clientId: group.clientId,
       clientName: group.clientName,
@@ -245,7 +281,8 @@ export function rollupClientEod(
       remaining,
       daysLeft,
       under: group.sent < alertMax,
-      needsTopUp: needsEmailTopUp(daysLeft),
+      needsTopUp: lowLeadCampaigns > 0,
+      lowLeadCampaigns,
       fraction: 1,
       startMinutes: 0,
       endMinutes: 0,
@@ -329,7 +366,7 @@ export function formatMiddayReport(
   return lines.join("\n");
 }
 
-/** Compact EOD post: sends vs 1,200, plus <7d top-up. Empty if no active clients. */
+/** Compact EOD post: sends vs 1,200, plus per-client low-on-leads counts. */
 export function formatEodReport(
   rows: ClientVolumeRow[],
   day: string,
@@ -340,10 +377,12 @@ export function formatEodReport(
   for (const row of sortVolumeRows(rows)) {
     const bits = [`${row.sent.toLocaleString()} / ${target.toLocaleString()}`];
     if (row.under) bits.push("*under*");
-    if (row.needsTopUp && row.daysLeft != null) {
-      bits.push(`*${formatDaysLeft(row.daysLeft)} left, needs top-up*`);
-    }
     lines.push(`• ${formatClientLabel(row)} — ${bits.join(" · ")}`);
+  }
+  const lowLines = formatLowOnLeadsLines(rows);
+  if (lowLines.length) {
+    lines.push("");
+    lines.push(...lowLines);
   }
   return lines.join("\n");
 }
@@ -361,12 +400,6 @@ export function formatVolumeAlert(
 function formatClientLabel(row: Pick<ClientVolumeRow, "clientId" | "clientName">): string {
   const id = row.clientId != null ? ` \`#${row.clientId}\`` : "";
   return `*${row.clientName}*${id}`;
-}
-
-function formatDaysLeft(days: number): string {
-  if (days <= 0) return "0d";
-  if (days < 10) return `~${days.toFixed(1)}d`;
-  return `~${Math.round(days)}d`;
 }
 
 function formatDayStamp(ymd: string, hour?: number): string {

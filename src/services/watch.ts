@@ -30,7 +30,17 @@ import {
 import { isSendDay, parseCampaignSchedule } from "../lib/schedule.js";
 import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
 import { resolveClient } from "../lib/clients.js";
-import { parseTodayVolume } from "../lib/pulse.js";
+import {
+  attachPulseUnder,
+  formatClientPulse,
+  isPulseExcludedCampaign,
+  parseTodayVolume,
+  pausedSeenOnDay,
+  resolvePulseSlot,
+  rollupClientPulse,
+  stillPausedCampaigns,
+  type PausedPulseRow,
+} from "../lib/pulse.js";
 import {
   formatEodReport,
   formatMiddayReport,
@@ -103,7 +113,8 @@ export class WatchService {
 
   /**
    * 15-minute watch. Weekday Slack: autobounce pauses, 75/90/100 completion,
-   * and HeyReach runway / pending-dry. No digest, pulse, or weekend posts.
+   * and HeyReach runway / pending-dry. No digest or weekend posts. The 2-hour
+   * pulse is a separate cron (`runPulse`).
    */
   async run(now = new Date()): Promise<WatchResult> {
     const result: WatchResult = {
@@ -155,6 +166,168 @@ export class WatchService {
     await this.inspectHeyReach(day, result, allowSlack);
     await this.state.save();
     return result;
+  }
+
+  /**
+   * Weekday 2-hour sent-today pulse. Client summary only — no Off track / low-on-leads
+   * dump. Mentions Cayden + Josh when any client is projected *under*. Read-only.
+   */
+  async runPulse(
+    now = new Date(),
+  ): Promise<{ posted: boolean; clients: number; under: number; paused: number }> {
+    const timeZone = this.config.sendShortfallTimezone;
+    const resolved = resolvePulseSlot(
+      now,
+      timeZone,
+      this.config.pulseHours,
+      this.config.pulseWeekdays,
+    );
+    if (!resolved) {
+      return { posted: false, clients: 0, under: 0, paused: 0 };
+    }
+
+    const { day, hour, slot } = resolved;
+    const key = `pulse:v3:${slot}`;
+    if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
+      this.state.setLastPulseSlot(slot);
+      return { posted: false, clients: 0, under: 0, paused: 0 };
+    }
+
+    const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
+    const clientsById = new Map(clients.map((client) => [client.id, client]));
+    const pulseExclude = {
+      ids: this.config.pulseExcludeCampaignIds,
+      names: this.config.pulseExcludeCampaignNames,
+    };
+    const rows: Array<{
+      clientId: number | null;
+      clientName: string;
+      sent: number;
+      bounced: number;
+    }> = [];
+    const volumeInputs: VolumeCampaignInput[] = [];
+    const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns, pulseExclude).map(
+      (campaign) => {
+        const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
+        return {
+          clientName: resolvedClient.clientName,
+          campaignName: campaign.name,
+          campaignId: campaign.id,
+        };
+      },
+    );
+
+    for (const campaign of campaigns) {
+      if (isNoiseCampaign(campaign.name)) continue;
+      if (isPulseExcludedCampaign(campaign, pulseExclude)) continue;
+      const status = String(campaign.status ?? "").toUpperCase();
+      if (status !== "ACTIVE" && status !== "PAUSED") continue;
+      const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
+      try {
+        const [today, settings, detail] = await Promise.all([
+          this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day).catch(() => null),
+          status === "ACTIVE"
+            ? this.smartlead.getCampaignSettings(campaign.id).catch(() => null)
+            : Promise.resolve(null),
+          status === "ACTIVE"
+            ? this.smartlead.getCampaign(campaign.id).catch(() => campaign)
+            : Promise.resolve(campaign),
+        ]);
+        const volume = parseTodayVolume(today, day);
+        rows.push({
+          clientId: resolvedClient.clientId,
+          clientName: resolvedClient.clientName,
+          sent: volume.sent,
+          bounced: volume.bounced,
+        });
+        if (status === "ACTIVE") {
+          const schedule = parseCampaignSchedule(
+            { ...(unwrap(settings) ?? {}), ...(unwrap(detail) ?? {}) },
+            {
+              timeZone,
+              gapMinutes: this.config.mailboxMinTimeGapMins,
+            },
+          );
+          if (isSendDay(schedule, now)) {
+            volumeInputs.push({
+              clientId: resolvedClient.clientId,
+              clientName: resolvedClient.clientName,
+              sent: volume.sent,
+              remaining: null,
+              schedule,
+            });
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[watchdog] pulse #${campaign.id} ${campaign.name}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+      await sleep(120);
+    }
+
+    const rolled = rollupClientPulse(rows);
+    if (!rolled.length && !paused.length) {
+      return { posted: false, clients: 0, under: 0, paused: 0 };
+    }
+
+    const volumeRows = rollupClientVolume(volumeInputs, now, timeZone, hour);
+    const clientsWithUnder = attachPulseUnder(rolled, volumeRows);
+    const underCount = clientsWithUnder.filter((row) => row.under).length;
+    const pausedToday = pausedSeenOnDay(
+      paused,
+      new Map(
+        paused.flatMap((row) =>
+          row.campaignId != null
+            ? [[row.campaignId, this.state.snapshot(row.campaignId).lastAutobounceAlertAt] as const]
+            : [],
+        ),
+      ),
+      day,
+      timeZone,
+    );
+
+    const text = formatClientPulse({
+      day,
+      hour,
+      clients: clientsWithUnder,
+      bounceWarn: this.config.bounceAutoPauseThreshold,
+      paused,
+      pausedToday,
+      exclude: pulseExclude,
+      mentionUserIds:
+        underCount > 0
+          ? [this.config.slackCaydenUserId, this.config.slackJoshUserId]
+          : [],
+    });
+    this.state.setLastPulseSlot(slot);
+    if (!text) {
+      await this.state.save();
+      return { posted: false, clients: rolled.length, under: underCount, paused: paused.length };
+    }
+
+    await this.notify(text, {
+      key,
+      campaignId: 0,
+      clientName: "All clients",
+      campaignName: `Client pulse ${slot}`,
+      kind: "pulse",
+      payload: {
+        day,
+        hour,
+        clients: clientsWithUnder,
+        paused,
+        under: underCount,
+      },
+    });
+    await this.state.save();
+    return {
+      posted: true,
+      clients: rolled.length,
+      under: underCount,
+      paused: paused.length,
+    };
   }
 
   /**
@@ -217,8 +390,8 @@ export class WatchService {
   }
 
   /**
-   * Weekday 5–6pm CT wrap-up. Sends today vs 1,200, plus clients with
-   * fewer than 7 days of email sends left. Read-only.
+   * Weekday 5–6pm CT wrap-up. Sends today vs 1,200, plus a per-client
+   * count of lists that are low on leads (<7 days at 1,200/day). Read-only.
    */
   async runEndOfDay(
     now = new Date(),
