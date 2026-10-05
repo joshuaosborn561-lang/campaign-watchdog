@@ -31,7 +31,8 @@ async function main(): Promise<void> {
   const watch = new WatchService(config, smartlead, slack, state, supabase);
 
   let running = false;
-  let queued: { kind: "midday" | "eod"; reason: string; firedAt: Date } | null = null;
+  type ScheduledJob = { kind: "pulse" | "midday" | "eod"; reason: string; firedAt: Date };
+  const queued: ScheduledJob[] = [];
 
   const persistTokens = async () => {
     const tokens = slack.tokenBundle();
@@ -51,11 +52,11 @@ async function main(): Promise<void> {
 
   const drainQueued = () => {
     running = false;
-    if (!queued) return;
-    const job = queued;
-    queued = null;
+    const job = queued.shift();
+    if (!job) return;
     if (job.kind === "midday") void runMidday(job.reason, job.firedAt);
-    else void runEod(job.reason, job.firedAt);
+    else if (job.kind === "eod") void runEod(job.reason, job.firedAt);
+    else void runPulse(job.reason, job.firedAt);
   };
 
   const runOnce = async (reason: string) => {
@@ -83,9 +84,29 @@ async function main(): Promise<void> {
     }
   };
 
+  const runPulse = async (reason: string, firedAt = new Date()) => {
+    if (running) {
+      queued.push({ kind: "pulse", reason, firedAt });
+      console.log(`[watchdog] queue ${reason}: watch busy`);
+      return;
+    }
+    running = true;
+    try {
+      await state.load();
+      const pulse = await watch.runPulse(firedAt);
+      console.log(
+        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} under=${pulse.under} paused=${pulse.paused}`,
+      );
+    } catch (error) {
+      console.error("[watchdog] pulse failed", error);
+    } finally {
+      drainQueued();
+    }
+  };
+
   const runMidday = async (reason: string, firedAt = new Date()) => {
     if (running) {
-      queued = { kind: "midday", reason, firedAt };
+      queued.push({ kind: "midday", reason, firedAt });
       console.log(`[watchdog] queue ${reason}: watch busy`);
       return;
     }
@@ -105,7 +126,7 @@ async function main(): Promise<void> {
 
   const runEod = async (reason: string, firedAt = new Date()) => {
     if (running) {
-      queued = { kind: "eod", reason, firedAt };
+      queued.push({ kind: "eod", reason, firedAt });
       console.log(`[watchdog] queue ${reason}: watch busy`);
       return;
     }
@@ -140,6 +161,11 @@ async function main(): Promise<void> {
     await runOnce("manual");
     res.json({ ok: true });
   });
+  app.post("/pulse", async (req, res) => {
+    if (!authorize(req, res)) return;
+    await runPulse("manual-pulse");
+    res.json({ ok: true });
+  });
   app.post("/midday", async (req, res) => {
     if (!authorize(req, res)) return;
     await runMidday("manual-midday");
@@ -159,6 +185,13 @@ async function main(): Promise<void> {
     config.cron,
     () => {
       void runOnce("cron");
+    },
+    { timezone: config.sendShortfallTimezone },
+  );
+  cron.schedule(
+    config.pulseCron,
+    () => {
+      void runPulse("pulse", new Date());
     },
     { timezone: config.sendShortfallTimezone },
   );

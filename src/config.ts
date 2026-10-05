@@ -2,6 +2,8 @@ import {
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
   DEFAULT_PULSE_WEEKDAYS,
+  DEFAULT_SLACK_CAYDEN_USER_ID,
+  DEFAULT_SLACK_JOSH_USER_ID,
 } from "./lib/pulse.js";
 import {
   DEFAULT_VOLUME_WEEKDAYS,
@@ -186,6 +188,8 @@ export interface AppConfig {
   slackClientId: string;
   slackClientSecret: string;
   slackChannelId: string;
+  slackCaydenUserId: string;
+  slackJoshUserId: string;
   supabaseUrl: string;
   supabaseServiceRoleKey: string;
   messagePerDay: number;
@@ -240,6 +244,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       slackClientId: optional("SLACK_CLIENT_ID"),
       slackClientSecret: optional("SLACK_CLIENT_SECRET"),
       slackChannelId,
+      slackCaydenUserId: optional("SLACK_CAYDEN_USER_ID", DEFAULT_SLACK_CAYDEN_USER_ID),
+      slackJoshUserId: optional("SLACK_JOSH_USER_ID", DEFAULT_SLACK_JOSH_USER_ID),
       supabaseUrl: optional("SUPABASE_URL"),
       supabaseServiceRoleKey: optional("SUPABASE_SERVICE_ROLE_KEY"),
       messagePerDay: optionalNumber("MESSAGE_PER_DAY", 30),

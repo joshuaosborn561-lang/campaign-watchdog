@@ -4,6 +4,8 @@ import { loadConfig } from "./config.js";
 import {
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
+  DEFAULT_SLACK_CAYDEN_USER_ID,
+  DEFAULT_SLACK_JOSH_USER_ID,
 } from "./lib/pulse.js";
 
 describe("loadConfig", () => {
@@ -13,6 +15,10 @@ describe("loadConfig", () => {
       SLACK_BOT_TOKEN: "xoxb-test",
     } as NodeJS.ProcessEnv);
     assert.equal(config.slackChannelId, "C0BT978GSAC");
+    assert.equal(config.slackCaydenUserId, DEFAULT_SLACK_CAYDEN_USER_ID);
+    assert.equal(config.slackJoshUserId, DEFAULT_SLACK_JOSH_USER_ID);
+    assert.equal(config.slackCaydenUserId, "U0BL8JT75KN");
+    assert.equal(config.slackJoshUserId, "U0AAX2XFJE7");
     assert.deepEqual(config.completionThresholds, [50, 75, 90, 100]);
     assert.equal(config.messagePerDay, 30);
     assert.equal(config.sendShortfallTimezone, "America/Chicago");
@@ -32,6 +38,17 @@ describe("loadConfig", () => {
     assert.equal(config.volumeAlertMax, 1080);
     assert.equal(config.eodCron, "30 17 * * 1-5");
     assert.equal(config.eodHour, 17);
+  });
+
+  it("reads Slack mention ids from env", () => {
+    const config = loadConfig({
+      SMARTLEAD_API_KEY: "sl-key",
+      SLACK_BOT_TOKEN: "xoxb-test",
+      SLACK_CAYDEN_USER_ID: "U111",
+      SLACK_JOSH_USER_ID: "U222",
+    } as NodeJS.ProcessEnv);
+    assert.equal(config.slackCaydenUserId, "U111");
+    assert.equal(config.slackJoshUserId, "U222");
   });
 
   it("merges extra pulse exclude ids and names onto the built-in defaults", () => {
