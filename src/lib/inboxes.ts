@@ -1,4 +1,4 @@
-import { asNumber, pickString } from "./parse.js";
+import { asNumber, asRecordArray, pickNumber, pickString, unwrap } from "./parse.js";
 
 export interface StaffableAccount {
   id: number;
@@ -24,6 +24,29 @@ export function classifyInboxes(accounts: StaffableAccount[]): {
     disconnected: attached.length - staffable.length,
     inboxesThatSent: attached.filter((account) => account.dailySent > 0).length,
   };
+}
+
+/** Linked inbox count from campaign detail/settings when the accounts API was skipped. */
+export function parseLinkedInboxCount(raw: unknown): number | null {
+  const root = unwrap(raw);
+  if (!root) return null;
+  for (const key of ["email_account_ids", "emailAccountIds", "account_ids"]) {
+    const value = root[key];
+    if (Array.isArray(value) && value.length) return value.length;
+  }
+  const accounts = asRecordArray(
+    root.email_accounts ?? root.emailAccounts ?? root.accounts,
+  );
+  const linked = accounts.filter((row) => (asNumber(row.id) ?? 0) > 0).length;
+  if (linked > 0) return linked;
+  return (
+    pickNumber(root, [
+      "email_account_count",
+      "emailAccountCount",
+      "total_email_accounts",
+      "account_count",
+    ]) ?? null
+  );
 }
 
 export function accountFromSmartlead(row: Record<string, unknown>): StaffableAccount {

@@ -13,6 +13,8 @@ import {
 import type { SlackClient } from "../clients/slack.js";
 import type { CampaignNameRow, SupabaseStore } from "../clients/supabase.js";
 import { detectAutobounce } from "../lib/autobounce.js";
+import { clientGroupKey, resolveClient } from "../lib/clients.js";
+import { accountFromSmartlead, classifyInboxes, parseLinkedInboxCount } from "../lib/inboxes.js";
 import {
   clientHasOtherActiveLeads,
   completionAlertsToPost,
@@ -29,9 +31,9 @@ import {
 } from "../lib/digest.js";
 import { isSendDay, parseCampaignSchedule } from "../lib/schedule.js";
 import { isCompletionIgnoredCampaign, isNoiseCampaign } from "../lib/names.js";
-import { resolveClient } from "../lib/clients.js";
 import {
   attachPulseUnder,
+  bouncePercent,
   formatClientPulse,
   isPulseExcludedCampaign,
   parseTodayVolume,
@@ -206,9 +208,16 @@ export class WatchService {
       bounced: number;
     }> = [];
     const volumeInputs: VolumeCampaignInput[] = [];
+    const pausedByKey = new Map<string, { paused: number; bounceHold: boolean }>();
     const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns, pulseExclude).map(
       (campaign) => {
         const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
+        const key = clientGroupKey(resolvedClient);
+        const current = pausedByKey.get(key) ?? { paused: 0, bounceHold: false };
+        current.paused += 1;
+        const lastBounce = this.state.snapshot(campaign.id).lastAutobounceAlertAt;
+        if (lastBounce) current.bounceHold = true;
+        pausedByKey.set(key, current);
         return {
           clientName: resolvedClient.clientName,
           campaignName: campaign.name,
@@ -224,16 +233,8 @@ export class WatchService {
       if (status !== "ACTIVE" && status !== "PAUSED") continue;
       const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
       try {
-        const [today, settings, detail] = await Promise.all([
-          this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day).catch(() => null),
-          status === "ACTIVE"
-            ? this.smartlead.getCampaignSettings(campaign.id).catch(() => null)
-            : Promise.resolve(null),
-          status === "ACTIVE"
-            ? this.smartlead.getCampaign(campaign.id).catch(() => campaign)
-            : Promise.resolve(campaign),
-        ]);
-        const volume = parseTodayVolume(today, day);
+        const parts = await this.fetchVolumeParts(campaign, day, status === "ACTIVE");
+        const volume = parseTodayVolume(parts.today, day);
         rows.push({
           clientId: resolvedClient.clientId,
           clientName: resolvedClient.clientName,
@@ -241,22 +242,15 @@ export class WatchService {
           bounced: volume.bounced,
         });
         if (status === "ACTIVE") {
-          const schedule = parseCampaignSchedule(
-            { ...(unwrap(settings) ?? {}), ...(unwrap(detail) ?? {}) },
-            {
-              timeZone,
-              gapMinutes: this.config.mailboxMinTimeGapMins,
-            },
-          );
-          if (isSendDay(schedule, now)) {
-            volumeInputs.push({
-              clientId: resolvedClient.clientId,
-              clientName: resolvedClient.clientName,
-              sent: volume.sent,
-              remaining: null,
-              schedule,
-            });
-          }
+          const input = this.toVolumeInput({
+            resolvedClient,
+            parts,
+            volume,
+            now,
+            timeZone,
+            extra: pausedByKey.get(clientGroupKey(resolvedClient)),
+          });
+          if (input) volumeInputs.push(input);
         }
       } catch (error) {
         console.warn(
@@ -459,6 +453,17 @@ export class WatchService {
     };
     const timeZone = this.config.sendShortfallTimezone;
     const rows: VolumeCampaignInput[] = [];
+    const pausedByKey = new Map<string, { paused: number; bounceHold: boolean }>();
+    for (const campaign of campaigns) {
+      if (isVolumeSkippedCampaign(campaign, mute)) continue;
+      if (String(campaign.status ?? "").toUpperCase() !== "PAUSED") continue;
+      const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
+      const key = clientGroupKey(resolvedClient);
+      const current = pausedByKey.get(key) ?? { paused: 0, bounceHold: false };
+      current.paused += 1;
+      if (this.state.snapshot(campaign.id).lastAutobounceAlertAt) current.bounceHold = true;
+      pausedByKey.set(key, current);
+    }
 
     for (const campaign of campaigns) {
       if (isVolumeSkippedCampaign(campaign, mute)) continue;
@@ -466,30 +471,17 @@ export class WatchService {
       if (status !== "ACTIVE") continue;
       const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
       try {
-        const [today, settings, detail, analytics] = await Promise.all([
-          this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day).catch(() => null),
-          this.smartlead.getCampaignSettings(campaign.id).catch(() => null),
-          this.smartlead.getCampaign(campaign.id).catch(() => campaign),
-          this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null),
-        ]);
-        const schedule = parseCampaignSchedule(
-          { ...(unwrap(settings) ?? {}), ...(unwrap(detail) ?? {}) },
-          {
-            timeZone,
-            gapMinutes: this.config.mailboxMinTimeGapMins,
-          },
-        );
-        if (!isSendDay(schedule, now)) continue;
-        const volume = parseTodayVolume(today, day);
-        const stats =
-          parseCampaignLeadStats(analytics) ?? parseCampaignLeadStats(detail);
-        rows.push({
-          clientId: resolvedClient.clientId,
-          clientName: resolvedClient.clientName,
-          sent: volume.sent,
-          remaining: stats?.remaining ?? null,
-          schedule,
+        const parts = await this.fetchVolumeParts(campaign, day, true);
+        const volume = parseTodayVolume(parts.today, day);
+        const input = this.toVolumeInput({
+          resolvedClient,
+          parts,
+          volume,
+          now,
+          timeZone,
+          extra: pausedByKey.get(clientGroupKey(resolvedClient)),
         });
+        if (input) rows.push(input);
       } catch (error) {
         console.warn(
           `[watchdog] volume #${campaign.id} ${campaign.name}:`,
@@ -499,6 +491,85 @@ export class WatchService {
       await sleep(120);
     }
     return rows;
+  }
+
+  private async fetchVolumeParts(
+    campaign: SmartleadCampaign,
+    day: string,
+    active: boolean,
+  ): Promise<{
+    today: unknown;
+    settings: unknown;
+    detail: unknown;
+    analytics: unknown;
+    accounts: Array<Record<string, unknown>>;
+  }> {
+    const [today, settings, detail, analytics, accounts] = await Promise.all([
+      this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day).catch(() => null),
+      active ? this.smartlead.getCampaignSettings(campaign.id).catch(() => null) : null,
+      active ? this.smartlead.getCampaign(campaign.id).catch(() => campaign) : campaign,
+      active ? this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null) : null,
+      active ? this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []) : [],
+    ]);
+    return {
+      today,
+      settings,
+      detail,
+      analytics,
+      accounts: (accounts ?? []) as Array<Record<string, unknown>>,
+    };
+  }
+
+  private toVolumeInput(input: {
+    resolvedClient: { clientId: number | null; clientName: string };
+    parts: {
+      settings: unknown;
+      detail: unknown;
+      analytics: unknown;
+      accounts: Array<Record<string, unknown>>;
+    };
+    volume: { sent: number; bounced: number };
+    now: Date;
+    timeZone: string;
+    extra?: { paused: number; bounceHold: boolean };
+  }): VolumeCampaignInput | null {
+    const schedule = parseCampaignSchedule(
+      { ...(unwrap(input.parts.settings) ?? {}), ...(unwrap(input.parts.detail) ?? {}) },
+      {
+        timeZone: input.timeZone,
+        gapMinutes: this.config.mailboxMinTimeGapMins,
+      },
+    );
+    if (!isSendDay(schedule, input.now)) return null;
+    const stats =
+      parseCampaignLeadStats(input.parts.analytics) ??
+      parseCampaignLeadStats(input.parts.detail);
+    const fromAccounts = input.parts.accounts.length
+      ? classifyInboxes(input.parts.accounts.map((row) => accountFromSmartlead(row)))
+      : null;
+    const linked =
+      fromAccounts?.attached ??
+      parseLinkedInboxCount(input.parts.detail) ??
+      parseLinkedInboxCount(input.parts.settings);
+    const bounceRate = bouncePercent(input.volume.sent, input.volume.bounced);
+    const bounceHold =
+      Boolean(input.extra?.bounceHold) ||
+      (bounceRate != null &&
+        input.volume.sent >= this.config.minBounceSample &&
+        bounceRate + 1e-9 >= this.config.bounceAutoPauseThreshold);
+    return {
+      clientId: input.resolvedClient.clientId,
+      clientName: input.resolvedClient.clientName,
+      sent: input.volume.sent,
+      bounced: input.volume.bounced,
+      remaining: stats?.remaining ?? null,
+      schedule,
+      attached: fromAccounts?.attached ?? linked,
+      staffable: fromAccounts?.staffable ?? null,
+      disconnected: fromAccounts?.disconnected ?? null,
+      pausedCampaigns: input.extra?.paused ?? 0,
+      bounceHold,
+    };
   }
 
   private async loadDirectories(): Promise<

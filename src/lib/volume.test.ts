@@ -255,12 +255,118 @@ describe("send-volume Slack copy", () => {
     assert.match(text ?? "", /\*Midday — Tue 9\/1 12:00pm\*/);
     assert.match(
       text ?? "",
-      /• \*Vasco Warranty\* `#548609` — 200 sent → 600 proj · \*under\*/,
+      /• \*Vasco Warranty\* `#548609` — 200 sent → 600 proj · \*under\* — pace short of 1,200/,
     );
     assert.match(
       text ?? "",
       /• \*TechEvolution\* `#10` — 400 sent → 1,200 proj · on track/,
     );
+  });
+
+  it("appends a one-phrase under reason without dumping campaigns", () => {
+    const text = formatMiddayReport(
+      [
+        volumeRow({
+          clientId: 345263,
+          clientName: "SalesGlider",
+          sent: 242,
+          projected: 666,
+          under: true,
+          underReason: "too few leads on ACTIVE lists",
+        }),
+        volumeRow({
+          clientId: 10,
+          clientName: "On Pace",
+          sent: 400,
+          projected: 1200,
+          under: false,
+        }),
+      ],
+      "2026-09-01",
+    );
+    assert.match(
+      text ?? "",
+      /• \*SalesGlider\* `#345263` — 242 sent → 666 proj · \*under\* — too few leads on ACTIVE lists/,
+    );
+    assert.match(text ?? "", /• \*On Pace\* `#10` — 400 sent → 1,200 proj · on track/);
+    assert.doesNotMatch(text ?? "", /Nurture/);
+    assert.doesNotMatch(text ?? "", /Off track/i);
+  });
+
+  it("rolls the primary under reason from remaining / inboxes / cap", () => {
+    const thin = rollupClientVolume(
+      [
+        {
+          clientId: 345263,
+          clientName: "SalesGlider",
+          sent: 242,
+          remaining: 80,
+          schedule: schedule(),
+        },
+      ],
+      noonTue,
+      CHICAGO,
+    );
+    assert.equal(thin[0]?.under, true);
+    assert.equal(thin[0]?.underReason, "too few leads on ACTIVE lists");
+
+    const thinInboxes = rollupClientVolume(
+      [
+        {
+          clientId: 592842,
+          clientName: "PowerGRYD",
+          sent: 97,
+          remaining: 8000,
+          attached: 20,
+          schedule: schedule(),
+        },
+      ],
+      noonTue,
+      CHICAGO,
+    );
+    assert.equal(thinInboxes[0]?.underReason, "only ~20 campaign inboxes linked");
+
+    const capped = rollupClientEod([
+      {
+        clientId: 1,
+        clientName: "Capped",
+        sent: 180,
+        remaining: 8000,
+        attached: 40,
+        schedule: schedule({ maxLeadsPerDay: 200 }),
+      },
+    ]);
+    assert.equal(capped[0]?.under, true);
+    assert.equal(capped[0]?.underReason, "daily send cap hitting");
+
+    const morningOnly = rollupClientVolume(
+      [
+        {
+          clientId: 2,
+          clientName: "Early window",
+          sent: 200,
+          remaining: 8000,
+          attached: 40,
+          schedule: schedule({ startHour: 6, endHour: 11 }),
+        },
+      ],
+      noonTue,
+      CHICAGO,
+    );
+    assert.equal(morningOnly[0]?.underReason, "outside send window");
+
+    const eod = rollupClientEod([
+      {
+        clientId: 3,
+        clientName: "Paused mix",
+        sent: 80,
+        remaining: 8000,
+        attached: 40,
+        pausedCampaigns: 3,
+        schedule: schedule(),
+      },
+    ]);
+    assert.equal(eod[0]?.underReason, "3 campaigns paused");
   });
 
   it("posts nothing when there are no active clients", () => {
@@ -273,7 +379,10 @@ describe("send-volume Slack copy", () => {
       [volumeRow({ clientId: null, clientName: "Unknown client", sent: 100, projected: 300 })],
       "2026-09-01",
     );
-    assert.match(text ?? "", /• \*Unknown client\* — 100 sent → 300 proj · \*under\*/);
+    assert.match(
+      text ?? "",
+      /• \*Unknown client\* — 100 sent → 300 proj · \*under\* — pace short of 1,200/,
+    );
     assert.doesNotMatch(text ?? "", /`#/);
   });
 });
@@ -310,7 +419,10 @@ describe("end-of-day volume", () => {
     const text = formatEodReport(rows, "2026-09-01");
     assert.match(text ?? "", /\*EOD — Tue 9\/1\*/);
     assert.match(text ?? "", /• \*Goliath\* `#1` — 1,180 \/ 1,200/);
-    assert.match(text ?? "", /• \*Vasco Warranty\* `#2` — 720 \/ 1,200 · \*under\*$/m);
+    assert.match(
+      text ?? "",
+      /• \*Vasco Warranty\* `#2` — 720 \/ 1,200 · \*under\* — pace short of 1,200/,
+    );
     assert.match(text ?? "", /• \*Vasco Warranty\* — 1 low on leads/);
     assert.doesNotMatch(text ?? "", /Goliath.*low on leads/);
     assert.doesNotMatch(text ?? "", /needs top-up/);
