@@ -6,14 +6,14 @@ Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GS
 
 | Post | When | Copy |
 | --- | --- | --- |
-| 2-hour pulse | `PULSE_CRON` default `5 8,10,12,14,16 * * 1-5` America/Chicago. Grace until the next slot. | `*Tue 9/1 10:00am — sent today*` then `*Client* — 400 sent · 0.5% bounce`. If any client is `*under*`, the post starts with `<@Cayden> <@Josh>`. |
-| Midday | `VOLUME_CRON` default `10 12 * * 1-5` America/Chicago. Projection snaps to 12:00. | `*Midday — Tue 9/1 12:00pm*` then `• *Client* \`#id\` — 200 sent → 600 proj · *under*` |
+| 2-hour pulse | `PULSE_CRON` default `5 8,10,12,14,16 * * 1-5` America/Chicago. Grace until the next slot. | `*Tue 9/1 10:00am — sent today*` then `*Client* — 400 sent · 0.5% bounce`. If any client is `*under*`, the post starts with `<@Cayden> <@Josh>` and that line appends a one-phrase reason. |
+| Midday | `VOLUME_CRON` default `10 12 * * 1-5` America/Chicago. Projection snaps to 12:00. | `*Midday — Tue 9/1 12:00pm*` then `• *Client* \`#id\` — 200 sent → 600 proj · *under* — too few leads on ACTIVE lists` |
 | Autobounce | Every 15 minutes (`CRON`), weekdays only. First-seen is seeded with no Slack. | `*Client* — *Campaign* \`#id\` auto-paused (8.2% bounce on 195 sends).` |
 | Nearly done / finished | Same 15-minute watch, weekdays only, as soon as 75% / 90% / 100% is crossed. 50% is tracked in state but not Slacked. | `*Client* — *Campaign* is nearly done (75%, 238 left). Refill soon.` / `finished the list.` plus whether the client still has another ACTIVE list with leads. |
 | HeyReach runway | Same 15-minute watch, weekdays only. `IN_PROGRESS` only. Call Followups `#530529` never alerts. | `*Client* — *Campaign* is nearly done (~5.8d LinkedIn runway, 21 left, 0 pending). Refill soon.` |
-| EOD | `EOD_CRON` default `30 17 * * 1-5` America/Chicago. Grace until ~6:30pm the same weekday. | `*EOD — Tue 9/1*` then `• *Client* \`#id\` — 720 / 1,200 · *under*` plus `• *Client* — 3 low on leads` (counts only; omit clients at zero). |
+| EOD | `EOD_CRON` default `30 17 * * 1-5` America/Chicago. Grace until ~6:30pm the same weekday. | `*EOD — Tue 9/1*` then `• *Client* \`#id\` — 720 / 1,200 · *under* — pace short of 1,200` plus `• *Client* — 3 low on leads` (counts only; omit clients at zero). |
 
-Pulse and midday flag `*under*` when projected &lt; 1,080 (more than 10% under the 1,200-send / 40-sender day). Pulse projection snaps to the slot hour (8/10/12/14/16). EOD compares actual sends to 1,200. Low-on-leads is EOD-only: each ACTIVE list with remaining / 1,200 under 7 days counts as one; Josh will ask for names.
+Pulse and midday flag `*under*` when projected &lt; 1,080 (more than 10% under the 1,200-send / 40-sender day). Pulse projection snaps to the slot hour (8/10/12/14/16). EOD compares actual sends to 1,200. Each `*under*` line appends one primary cause from live Smartlead signals already on that client (leads, inboxes, bounce hold, paused lists, daily cap, or outside send window — otherwise `pace short of 1,200`). No campaign dump. Low-on-leads is EOD-only: each ACTIVE list with remaining / 1,200 under 7 days counts as one; Josh will ask for names.
 
 Pulse does **not** dump Off track / too-few-leads / runway essays. Mentions fire only when at least one pulse line is `*under*` — never on a clean pulse, and never for low-on-leads.
 

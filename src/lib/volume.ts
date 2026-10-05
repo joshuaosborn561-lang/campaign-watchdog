@@ -2,6 +2,7 @@ import { clientGroupKey } from "./clients.js";
 import { isNoiseCampaign } from "./names.js";
 import { isPulseExcludedCampaign, type PulseExclude } from "./pulse.js";
 import { type CampaignSchedule } from "./schedule.js";
+import { explainUnderVolume, formatUnderFlag } from "./under-reason.js";
 import {
   clockMinutesInZone,
   hourInZone,
@@ -37,6 +38,12 @@ export interface VolumeCampaignInput {
   sent: number;
   remaining?: number | null;
   schedule: CampaignSchedule;
+  bounced?: number;
+  attached?: number | null;
+  staffable?: number | null;
+  disconnected?: number | null;
+  pausedCampaigns?: number;
+  bounceHold?: boolean;
 }
 
 export interface ClientVolumeRow {
@@ -47,6 +54,8 @@ export interface ClientVolumeRow {
   remaining: number | null;
   daysLeft: number | null;
   under: boolean;
+  /** One-sentence primary cause when `under` — never a campaign dump. */
+  underReason?: string;
   needsTopUp: boolean;
   /** ACTIVE lists whose remaining / 1,200-send days is under EMAIL_RUNWAY_DAYS. */
   lowLeadCampaigns: number;
@@ -127,6 +136,88 @@ export function formatLowOnLeadsLines(
     .map((row) => `• *${row.clientName}* — ${row.lowLeadCampaigns} low on leads`);
 }
 
+interface VolumeGroup {
+  clientId: number | null;
+  clientName: string;
+  sent: number;
+  bounced: number;
+  remainings: Array<number | null | undefined>;
+  schedules: CampaignSchedule[];
+  attacheds: Array<number | null | undefined>;
+  staffables: Array<number | null | undefined>;
+  disconnecteds: Array<number | null | undefined>;
+  pausedCampaigns: number;
+  bounceHold: boolean;
+  caps: Array<number | null>;
+}
+
+function addVolumeGroupRow(
+  groups: Map<string, VolumeGroup>,
+  row: VolumeCampaignInput,
+): void {
+  const key = clientGroupKey(row);
+  const current = groups.get(key) ?? {
+    clientId: row.clientId ?? null,
+    clientName: row.clientName,
+    sent: 0,
+    bounced: 0,
+    remainings: [],
+    schedules: [],
+    attacheds: [],
+    staffables: [],
+    disconnecteds: [],
+    pausedCampaigns: 0,
+    bounceHold: false,
+    caps: [],
+  };
+  current.sent += Math.max(0, row.sent);
+  current.bounced += Math.max(0, row.bounced ?? 0);
+  current.remainings.push(row.remaining);
+  current.schedules.push(row.schedule);
+  current.attacheds.push(row.attached);
+  current.staffables.push(row.staffable);
+  current.disconnecteds.push(row.disconnected);
+  current.pausedCampaigns = Math.max(current.pausedCampaigns, row.pausedCampaigns ?? 0);
+  current.bounceHold = current.bounceHold || Boolean(row.bounceHold);
+  current.caps.push(row.schedule.maxLeadsPerDay);
+  groups.set(key, current);
+}
+
+function underSignalsFromGroup(
+  group: VolumeGroup,
+  remaining: number | null,
+  outsideWindow: boolean,
+  alertMax = VOLUME_ALERT_MAX,
+) {
+  return {
+    sent: group.sent,
+    remaining,
+    bounced: group.bounced,
+    attached: sumKnown(group.attacheds),
+    staffable: sumKnown(group.staffables),
+    disconnected: sumKnown(group.disconnecteds),
+    pausedCampaigns: group.pausedCampaigns,
+    activeCampaigns: group.schedules.length,
+    bounceHold: group.bounceHold,
+    maxLeadsPerDay: rollupDailyCap(group.caps),
+    outsideWindow,
+    alertMax,
+  };
+}
+
+function rollupDailyCap(caps: Array<number | null>): number | null {
+  const known = caps.filter((value): value is number => value != null && value > 0);
+  if (!known.length) return null;
+  if (known.length === caps.length) return known.reduce((sum, value) => sum + value, 0);
+  return caps.length === 1 ? known[0] : null;
+}
+
+function sumKnown(values: Array<number | null | undefined>): number | null {
+  const known = values.filter((value): value is number => value != null && Number.isFinite(value));
+  if (!known.length) return null;
+  return known.reduce((sum, value) => sum + Math.max(0, value), 0);
+}
+
 function sumRemaining(values: Array<number | null | undefined>): number | null {
   const known = values.filter((value): value is number => value != null && Number.isFinite(value));
   if (!known.length) return null;
@@ -187,29 +278,9 @@ export function rollupClientVolume(
   targetTimeZone: string,
   slotHour = VOLUME_SLOT_HOUR,
 ): ClientVolumeRow[] {
-  const groups = new Map<
-    string,
-    {
-      clientId: number | null;
-      clientName: string;
-      sent: number;
-      remainings: Array<number | null | undefined>;
-      schedules: CampaignSchedule[];
-    }
-  >();
+  const groups = new Map<string, VolumeGroup>();
   for (const row of rows) {
-    const key = clientGroupKey(row);
-    const current = groups.get(key) ?? {
-      clientId: row.clientId ?? null,
-      clientName: row.clientName,
-      sent: 0,
-      remainings: [],
-      schedules: [],
-    };
-    current.sent += Math.max(0, row.sent);
-    current.remainings.push(row.remaining);
-    current.schedules.push(row.schedule);
-    groups.set(key, current);
+    addVolumeGroupRow(groups, row);
   }
 
   const slotMinutes = slotHour * 60;
@@ -223,6 +294,8 @@ export function rollupClientVolume(
     const remaining = sumRemaining(group.remainings);
     const daysLeft = emailDaysLeft(remaining);
     const lowLeadCampaigns = countLowLeadCampaigns(group.remainings);
+    const under = projected < VOLUME_ALERT_MAX;
+    const outsideWindow = slotMinutes < window.start || slotMinutes >= window.end;
     out.push({
       clientId: group.clientId,
       clientName: group.clientName,
@@ -230,7 +303,10 @@ export function rollupClientVolume(
       projected,
       remaining,
       daysLeft,
-      under: projected < VOLUME_ALERT_MAX,
+      under,
+      underReason: under
+        ? explainUnderVolume(underSignalsFromGroup(group, remaining, outsideWindow)).text
+        : undefined,
       needsTopUp: lowLeadCampaigns > 0,
       lowLeadCampaigns,
       fraction,
@@ -246,26 +322,9 @@ export function rollupClientEod(
   target = VOLUME_TARGET_SENDS,
   alertMax = VOLUME_ALERT_MAX,
 ): ClientVolumeRow[] {
-  const groups = new Map<
-    string,
-    {
-      clientId: number | null;
-      clientName: string;
-      sent: number;
-      remainings: Array<number | null | undefined>;
-    }
-  >();
+  const groups = new Map<string, VolumeGroup>();
   for (const row of rows) {
-    const key = clientGroupKey(row);
-    const current = groups.get(key) ?? {
-      clientId: row.clientId ?? null,
-      clientName: row.clientName,
-      sent: 0,
-      remainings: [],
-    };
-    current.sent += Math.max(0, row.sent);
-    current.remainings.push(row.remaining);
-    groups.set(key, current);
+    addVolumeGroupRow(groups, row);
   }
 
   const out: ClientVolumeRow[] = [];
@@ -273,6 +332,7 @@ export function rollupClientEod(
     const remaining = sumRemaining(group.remainings);
     const daysLeft = emailDaysLeft(remaining, target);
     const lowLeadCampaigns = countLowLeadCampaigns(group.remainings, target);
+    const under = group.sent < alertMax;
     out.push({
       clientId: group.clientId,
       clientName: group.clientName,
@@ -280,7 +340,10 @@ export function rollupClientEod(
       projected: group.sent,
       remaining,
       daysLeft,
-      under: group.sent < alertMax,
+      under,
+      underReason: under
+        ? explainUnderVolume(underSignalsFromGroup(group, remaining, false, alertMax)).text
+        : undefined,
       needsTopUp: lowLeadCampaigns > 0,
       lowLeadCampaigns,
       fraction: 1,
@@ -358,7 +421,7 @@ export function formatMiddayReport(
   const lines = [`*Midday — ${formatDayStamp(day, 12)}*`];
   for (const row of sortVolumeRows(rows)) {
     const proj = Math.round(row.projected).toLocaleString();
-    const flag = row.under ? " · *under*" : " · on track";
+    const flag = row.under ? formatUnderFlag(true, row.underReason) : " · on track";
     lines.push(
       `• ${formatClientLabel(row)} — ${row.sent.toLocaleString()} sent → ${proj} proj${flag}`,
     );
@@ -376,8 +439,13 @@ export function formatEodReport(
   const lines = [`*EOD — ${formatDayStamp(day)}*`];
   for (const row of sortVolumeRows(rows)) {
     const bits = [`${row.sent.toLocaleString()} / ${target.toLocaleString()}`];
-    if (row.under) bits.push("*under*");
-    lines.push(`• ${formatClientLabel(row)} — ${bits.join(" · ")}`);
+    if (row.under) {
+      lines.push(
+        `• ${formatClientLabel(row)} — ${bits.join(" · ")}${formatUnderFlag(true, row.underReason)}`,
+      );
+    } else {
+      lines.push(`• ${formatClientLabel(row)} — ${bits.join(" · ")}`);
+    }
   }
   const lowLines = formatLowOnLeadsLines(rows);
   if (lowLines.length) {

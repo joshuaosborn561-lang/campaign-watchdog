@@ -2,6 +2,7 @@ import { clientGroupKey } from "./clients.js";
 import { isNoiseCampaign, shortCampaignName } from "./names.js";
 import { pickNumber, pickString, unwrap } from "./parse.js";
 import { hourInZone, minutesInZone, weekdayInZone, ymdInZone } from "./time.js";
+import { formatUnderFlag } from "./under-reason.js";
 
 export type PulseShortfall = "too few senders" | "too few leads" | "smtp_down" | "not_sending";
 
@@ -12,6 +13,8 @@ export interface ClientPulse {
   bounced: number;
   /** Projected send shortfall — same band as midday/EOD `*under*`. */
   under?: boolean;
+  /** One-sentence primary cause when `under`. */
+  underReason?: string;
 }
 
 /** Cayden in #campaign-watchdog. Override with SLACK_CAYDEN_USER_ID. */
@@ -115,16 +118,26 @@ export function formatUnderMentionLine(userIds: Iterable<string>): string | null
   return mentions.length ? mentions.join(" ") : null;
 }
 
-/** Copy `*under*` from volume rollup onto the sent-today client lines. */
+/** Copy `*under*` + reason from volume rollup onto the sent-today client lines. */
 export function attachPulseUnder(
   clients: ClientPulse[],
-  volumeRows: Array<{ clientId?: number | null; clientName: string; under: boolean }>,
+  volumeRows: Array<{
+    clientId?: number | null;
+    clientName: string;
+    under: boolean;
+    underReason?: string;
+  }>,
 ): ClientPulse[] {
-  const underByKey = new Map(volumeRows.map((row) => [clientGroupKey(row), row.under]));
-  return clients.map((row) => ({
-    ...row,
-    under: underByKey.get(clientGroupKey(row)) ?? false,
-  }));
+  const volumeByKey = new Map(volumeRows.map((row) => [clientGroupKey(row), row]));
+  return clients.map((row) => {
+    const volume = volumeByKey.get(clientGroupKey(row));
+    const under = volume?.under ?? false;
+    return {
+      ...row,
+      under,
+      underReason: under ? volume?.underReason : undefined,
+    };
+  });
 }
 
 export function rollupClientPulse(
@@ -460,8 +473,8 @@ function formatClientLine(row: ClientPulse, bounceWarn: number): string {
       bits.push(pct + 1e-9 >= bounceWarn ? `*${label}*` : label);
     }
   }
-  if (row.under) bits.push("*under*");
-  return bits.join(" · ");
+  const line = bits.join(" · ");
+  return row.under ? `${line}${formatUnderFlag(true, row.underReason)}` : line;
 }
 
 function formatPct(value: number): string {

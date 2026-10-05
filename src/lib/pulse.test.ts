@@ -98,11 +98,55 @@ describe("client pulse", () => {
       under.split("\n")[0],
       `<@${DEFAULT_SLACK_CAYDEN_USER_ID}> <@${DEFAULT_SLACK_JOSH_USER_ID}>`,
     );
-    assert.match(under, /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\*/);
+    assert.match(
+      under,
+      /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\* — pace short of 1,200/,
+    );
     assert.match(under, /\*Bolder Cyber Partners\* — 400 sent · 0\.5% bounce$/m);
     assert.doesNotMatch(under, /too few leads/);
     assert.doesNotMatch(under, /Off track/);
     assert.doesNotMatch(under, /Refill soon/);
+  });
+
+  it("appends the volume under-reason on the client line, not a campaign dump", () => {
+    const text = formatClientPulse({
+      day: "2026-09-01",
+      hour: 10,
+      bounceWarn: 5,
+      mentionUserIds: [DEFAULT_SLACK_CAYDEN_USER_ID],
+      clients: [
+        {
+          clientId: 345263,
+          clientName: "SalesGlider",
+          sent: 242,
+          bounced: 1,
+          under: true,
+          underReason: "too few leads on ACTIVE lists",
+        },
+      ],
+    });
+    assert.match(
+      text,
+      /\*SalesGlider\* — 242 sent · 0\.4% bounce · \*under\* — too few leads on ACTIVE lists/,
+    );
+    assert.doesNotMatch(text, /Nurture/);
+    assert.doesNotMatch(text, /Off track/);
+  });
+
+  it("copies volume underReason onto the matching client pulse row", () => {
+    const clients = attachPulseUnder(
+      [{ clientId: 548609, clientName: "Vasco Warranty", sent: 80, bounced: 0 }],
+      [
+        {
+          clientId: 548609,
+          clientName: "Vasco Warranty",
+          under: true,
+          underReason: "only ~20 campaign inboxes linked",
+        },
+      ],
+    );
+    assert.equal(clients[0].under, true);
+    assert.equal(clients[0].underReason, "only ~20 campaign inboxes linked");
   });
 
   it("does not @ anyone for under when mention ids are missing", () => {
@@ -112,7 +156,7 @@ describe("client pulse", () => {
       bounceWarn: 5,
       clients: [{ clientName: "Vasco Warranty", sent: 0, bounced: 0, under: true }],
     });
-    assert.match(text, /\*Vasco Warranty\* — 0 sent · \*under\*/);
+    assert.match(text, /\*Vasco Warranty\* — 0 sent · \*under\* — pace short of 1,200/);
     assert.doesNotMatch(text, /<@/);
   });
 

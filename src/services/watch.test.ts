@@ -40,9 +40,13 @@ function fakeSmartlead(options: {
     }>
   >;
 }) {
-  const defaultInbox = [
-    { id: 1, from_email: "a@x.com", is_smtp_success: true, is_imap_success: true, daily_sent_count: 0 },
-  ];
+  const defaultInbox = Array.from({ length: 40 }, (_, i) => ({
+    id: i + 1,
+    from_email: `s${i}@x.com`,
+    is_smtp_success: true,
+    is_imap_success: true,
+    daily_sent_count: 0,
+  }));
   return {
     listCampaigns: async () => options.campaigns,
     listClients: async () => options.clients ?? [],
@@ -232,7 +236,10 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
           text,
           /• \*Bolder Cyber Partners\* `#542838` — 400 sent → 1,200 proj · on track/,
         );
-        assert.match(text, /• \*Vasco Warranty\* `#548609` — 200 sent → 600 proj · \*under\*/);
+        assert.match(
+          text,
+          /• \*Vasco Warranty\* `#548609` — 200 sent → 600 proj · \*under\* — pace short of 1,200/,
+        );
         assert.doesNotMatch(text, /Off track/i);
         assert.doesNotMatch(text, /low on leads/);
         assert.doesNotMatch(text, /needs top-up/);
@@ -336,10 +343,88 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         assert.equal(result.under, 1);
         const text = slack.posted[0] ?? "";
         assert.equal(text.split("\n")[0], "<@U0BL8JT75KN> <@U0AAX2XFJE7>");
-        assert.match(text, /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\*/);
+        assert.match(
+          text,
+          /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\* — pace short of 1,200/,
+        );
         assert.match(text, /\*Bolder Cyber Partners\* — 400 sent/);
         assert.doesNotMatch(text, /too few leads/);
         assert.doesNotMatch(text, /Off track/i);
+      },
+    );
+  });
+
+  it("explains pulse *under* from remaining leads without dumping campaigns", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({ id: 200, name: "SalesGlider Nurture", client_id: 345263 }),
+        ],
+        clients: [{ id: 345263, name: "SalesGlider" }],
+        analyticsByDate: {
+          200: { data: [{ date: "2026-09-01", sent_count: 80, bounce_count: 0 }] },
+        },
+        analytics: {
+          200: {
+            total_count: "90",
+            campaign_lead_stats: { total: 90, notStarted: 5, inprogress: 5 },
+          },
+        },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[345263, "SalesGlider"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.posted, true);
+        assert.equal(result.under, 1);
+        const text = slack.posted[0] ?? "";
+        assert.match(
+          text,
+          /\*SalesGlider\* — 80 sent · 0\.0% bounce · \*under\* — too few leads on ACTIVE lists/,
+        );
+        assert.doesNotMatch(text, /Nurture/);
+        assert.doesNotMatch(text, /Off track/i);
+      },
+    );
+  });
+
+  it("explains midday *under* from too few linked inboxes", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [campaign({ id: 300, name: "PowerGRYD Owners", client_id: 592842 })],
+        clients: [{ id: 592842, name: "PowerGRYD" }],
+        analyticsByDate: {
+          300: { data: [{ date: "2026-09-01", sent_count: 97 }] },
+        },
+        analytics: {
+          300: {
+            total_count: "20000",
+            campaign_lead_stats: { total: 20000, notStarted: 15000, inprogress: 2000 },
+          },
+        },
+        emailAccounts: {
+          300: Array.from({ length: 20 }, (_, i) => ({
+            id: i + 1,
+            from_email: `p${i}@x.com`,
+            is_smtp_success: true,
+            is_imap_success: true,
+            daily_sent_count: 2,
+          })),
+        },
+      }),
+      slack,
+      fakeSupabase({ registry: new Map([[592842, "PowerGRYD"]]) }),
+      async (watch) => {
+        const result = await watch.runVolumeCheck(noonTue);
+        assert.equal(result.posted, true);
+        const text = slack.posted[0] ?? "";
+        assert.match(
+          text,
+          /• \*PowerGRYD\* `#592842` — 97 sent → 291 proj · \*under\* — only ~20 campaign inboxes linked/,
+        );
+        assert.doesNotMatch(text, /Owners/);
       },
     );
   });
@@ -448,7 +533,10 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
       async (watch) => {
         await watch.runVolumeCheck(noonTue);
         const text = slack.posted[0] ?? "";
-        assert.match(text, /\*Bolder Cyber Partners\* `#542838` — 0 sent → 0 proj · \*under\*/);
+        assert.match(
+          text,
+          /\*Bolder Cyber Partners\* `#542838` — 0 sent → 0 proj · \*under\* — pace short of 1,200/,
+        );
         assert.match(text, /\*Culture Fits\* `#777` — 400 sent → 1,200 proj · on track/);
         assert.doesNotMatch(text, /5,328/);
       },
@@ -496,8 +584,12 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         const text = slack.posted[0] ?? "";
         assert.match(text, /\*EOD — Tue 9\/1\*/);
         assert.match(text, /• \*Bolder Cyber Partners\* `#542838` — 1,180 \/ 1,200/);
-        assert.match(text, /• \*Vasco Warranty\* `#548609` — 720 \/ 1,200 · \*under\*$/m);
+        assert.match(
+          text,
+          /• \*Vasco Warranty\* `#548609` — 720 \/ 1,200 · \*under\* — pace short of 1,200/,
+        );
         assert.match(text, /• \*Vasco Warranty\* — 1 low on leads/);
+        assert.doesNotMatch(text, /Signal/);
         assert.doesNotMatch(text, /Bolder Cyber Partners\* — \d+ low on leads/);
         assert.doesNotMatch(text, /needs top-up/);
         assert.doesNotMatch(text, /Off track/i);
