@@ -18,6 +18,8 @@ export interface BounceResumeCandidate {
   clientId: number | null;
   pausedReason?: string | null;
   lastAutobounceAlertAt?: string;
+  /** Auto-bounce detected from campaign analytics (Insight-style). */
+  autobounce?: boolean;
   fromActivityLog?: boolean;
   linkedMailboxes?: number | null;
   remainingLeads?: number | null;
@@ -69,34 +71,49 @@ export function campaignIdFromActivityLog(row: Record<string, unknown>): number 
 
 export function isBounceHold(candidate: BounceResumeCandidate): boolean {
   return Boolean(
-    candidate.fromActivityLog ||
+    candidate.autobounce ||
+      candidate.fromActivityLog ||
       candidate.lastAutobounceAlertAt ||
       isBounceProtectionReason(candidate.pausedReason),
   );
 }
 
 /**
- * Why this bounce hold should stay paused. `null` means START it.
- * Mailbox / remaining checks apply only after those fields are known.
+ * Cheap checks that need no Smartlead fetches. Returns the skip reason, or
+ * `null` when the candidate is worth fetching campaign detail for.
  */
-export function bounceResumeSkipReason(
+export function bounceResumePrefilterSkipReason(
   candidate: BounceResumeCandidate,
   rules: BounceResumeRules,
 ): string | null {
-  if (!rules.enabled) return "disabled";
-  if (String(candidate.status ?? "PAUSED").toUpperCase() !== "PAUSED") return "not paused";
-  if (!isBounceHold(candidate)) return "not a bounce hold";
+  if (!rules.enabled) return "enabled";
+  if (String(candidate.status ?? "PAUSED").toUpperCase() !== "PAUSED") return "paused";
   if (isNoiseCampaign(candidate.name)) return "noise";
-  if (new Set(rules.excludeIds).has(candidate.id)) return "excluded id";
-  if (candidate.clientId == null) return "no client";
+  if (new Set(rules.excludeIds).has(candidate.id)) return "exclude";
+  if (candidate.clientId == null) return "no-client";
   const goliathId = rules.goliathClientId ?? GOLIATH_BOUNCE_RESUME_CLIENT_ID;
   const holdThrough = rules.goliathHoldThrough ?? GOLIATH_BOUNCE_RESUME_HOLD_THROUGH;
   if (
     candidate.clientId === goliathId &&
     ymdInZone(rules.now, rules.timeZone) <= holdThrough
   ) {
-    return "goliath hold";
+    return "goliath";
   }
+  return null;
+}
+
+/**
+ * Why this bounce hold should stay paused. `null` means START it.
+ * Prefilter first, then bounce-hold detection, then mailbox / remaining checks
+ * (applied only once those fields are known).
+ */
+export function bounceResumeSkipReason(
+  candidate: BounceResumeCandidate,
+  rules: BounceResumeRules,
+): string | null {
+  const prefilter = bounceResumePrefilterSkipReason(candidate, rules);
+  if (prefilter != null) return prefilter;
+  if (!isBounceHold(candidate)) return "not a bounce hold";
   if (candidate.linkedMailboxes != null && candidate.linkedMailboxes <= 0) {
     return "no mailboxes";
   }

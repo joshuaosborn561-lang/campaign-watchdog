@@ -1217,6 +1217,91 @@ describe("WatchService Slack — bounce-hold auto-resume", () => {
     );
   });
 
+  it("STARTs an analytics-only (Insight-style) autobounce hold with no reason or stamp", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({ id: 66, name: "BCP Displacement Hold", status: "PAUSED", client_id: BCP }),
+      ],
+      clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+      analyticsByDate: {
+        66: { data: [{ date: "2026-09-01", sent_count: 0, bounce_count: 0 }] },
+      },
+      analytics: { 66: { ...remaining, sent_count: 100, bounce_count: 10 } },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.unpaused, 1);
+        assert.deepEqual(smartlead.started, [{ id: 66, status: "START" }]);
+        assert.match(slack.posted[0] ?? "", /Unpaused 1 bounce holds/);
+      },
+    );
+  });
+
+  it("still resumes bounce holds when the slot card was already posted", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+        campaign({
+          id: 88,
+          name: "BCP Displacement Hold",
+          status: "PAUSED",
+          client_id: BCP,
+          paused_reason: "bounce protection",
+        }),
+      ],
+      clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+      analyticsByDate: {
+        100: { data: [{ date: "2026-09-01", sent_count: 400, bounce_count: 0 }] },
+        88: { data: [{ date: "2026-09-01", sent_count: 0, bounce_count: 0 }] },
+      },
+      analytics: { 88: remaining, 100: remaining },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch, state) => {
+        state.setLastPulseSlot("2026-09-01T10");
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.posted, false);
+        assert.equal(result.unpaused, 1);
+        assert.deepEqual(smartlead.started, [{ id: 88, status: "START" }]);
+        assert.equal(slack.posted.length, 1);
+        assert.equal(slack.posted[0], "Unpaused 1 bounce holds");
+      },
+    );
+  });
+
+  it("does not START an exclude-list ID even when analytics show autobounce", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({ id: 3739316, name: "Cayden holdout", status: "PAUSED", client_id: 345263 }),
+      ],
+      clients: [{ id: 345263, name: "SalesGlider" }],
+      analyticsByDate: {
+        3739316: { data: [{ date: "2026-09-01", sent_count: 0 }] },
+      },
+      analytics: { 3739316: { ...remaining, sent_count: 100, bounce_count: 10 } },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[345263, "SalesGlider"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.unpaused, 0);
+        assert.deepEqual(smartlead.started, []);
+      },
+    );
+  });
+
   it("does not START when AUTO_RESUME_BOUNCE_HOLDS is off", async () => {
     const slack = fakeSlack();
     const smartlead = fakeSmartlead({

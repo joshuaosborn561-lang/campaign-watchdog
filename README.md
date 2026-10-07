@@ -26,6 +26,14 @@ On each weekday pulse (same `PULSE_CRON`, still Mon–Fri only), before the sent
 3. `POST` Smartlead status `START` for each remaining campaign.
 4. Add `Unpaused N bounce holds` to the pulse when N &gt; 0.
 
+Analytics-based detection: Auto-bounce is detected via campaign analytics, so a paused campaign with no activity-log reason or Watchdog stamp still qualifies when its analytics look like an autobounce.
+
+Timing: Resume runs after the pulse slot card posts. If the slot card already posted, the resume pass still runs, and a standalone `Unpaused N bounce holds` message is sent when N &gt; 0.
+
+Insight-style: Analytics-based resume runs independently of campaign status changes.
+
+The exclude list, Goliath, noise, and no-client checks run as a cheap prefilter before any Smartlead campaign fetches.
+
 Kill switch: `AUTO_RESUME_BOUNCE_HOLDS` (default `true`). Weekend pulses still no-op.
 
 ## What no longer posts
