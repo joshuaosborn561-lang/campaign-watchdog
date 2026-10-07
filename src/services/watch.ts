@@ -13,6 +13,11 @@ import {
 import type { SlackClient } from "../clients/slack.js";
 import type { CampaignNameRow, SupabaseStore } from "../clients/supabase.js";
 import { detectAutobounce } from "../lib/autobounce.js";
+import {
+  bounceResumeSkipReason,
+  pausedReasonFrom,
+  type BounceResumeCandidate,
+} from "../lib/bounce-resume.js";
 import { clientGroupKey, resolveClient } from "../lib/clients.js";
 import { accountFromSmartlead, classifyInboxes, parseLinkedInboxCount } from "../lib/inboxes.js";
 import {
@@ -172,11 +177,12 @@ export class WatchService {
 
   /**
    * Weekday 2-hour sent-today pulse. Client summary only — no Off track / low-on-leads
-   * dump. Mentions Cayden + Josh when any client is projected *under*. Read-only.
+   * dump. Mentions Cayden + Josh when any client is projected *under*. Before the
+   * rollup, STARTs bounce-protection holds unless AUTO_RESUME_BOUNCE_HOLDS is off.
    */
   async runPulse(
     now = new Date(),
-  ): Promise<{ posted: boolean; clients: number; under: number; paused: number }> {
+  ): Promise<{ posted: boolean; clients: number; under: number; paused: number; unpaused: number }> {
     const timeZone = this.config.sendShortfallTimezone;
     const resolved = resolvePulseSlot(
       now,
@@ -185,18 +191,26 @@ export class WatchService {
       this.config.pulseWeekdays,
     );
     if (!resolved) {
-      return { posted: false, clients: 0, under: 0, paused: 0 };
+      return { posted: false, clients: 0, under: 0, paused: 0, unpaused: 0 };
     }
 
     const { day, hour, slot } = resolved;
     const key = `pulse:v3:${slot}`;
     if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
       this.state.setLastPulseSlot(slot);
-      return { posted: false, clients: 0, under: 0, paused: 0 };
+      return { posted: false, clients: 0, under: 0, paused: 0, unpaused: 0 };
     }
 
     const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
     const clientsById = new Map(clients.map((client) => [client.id, client]));
+    const unpaused = await this.resumeBounceHolds({
+      campaigns,
+      clientsById,
+      supabaseCampaigns,
+      registry,
+      now,
+      timeZone,
+    });
     const pulseExclude = {
       ids: this.config.pulseExcludeCampaignIds,
       names: this.config.pulseExcludeCampaignNames,
@@ -262,8 +276,8 @@ export class WatchService {
     }
 
     const rolled = rollupClientPulse(rows);
-    if (!rolled.length && !paused.length) {
-      return { posted: false, clients: 0, under: 0, paused: 0 };
+    if (!rolled.length && !paused.length && !unpaused) {
+      return { posted: false, clients: 0, under: 0, paused: 0, unpaused };
     }
 
     const volumeRows = rollupClientVolume(volumeInputs, now, timeZone, hour);
@@ -294,11 +308,18 @@ export class WatchService {
         underCount > 0
           ? [this.config.slackCaydenUserId, this.config.slackJoshUserId]
           : [],
+      unpausedBounceHolds: unpaused,
     });
     this.state.setLastPulseSlot(slot);
     if (!text) {
       await this.state.save();
-      return { posted: false, clients: rolled.length, under: underCount, paused: paused.length };
+      return {
+        posted: false,
+        clients: rolled.length,
+        under: underCount,
+        paused: paused.length,
+        unpaused,
+      };
     }
 
     await this.notify(text, {
@@ -321,6 +342,7 @@ export class WatchService {
       clients: rolled.length,
       under: underCount,
       paused: paused.length,
+      unpaused,
     };
   }
 
@@ -442,6 +464,94 @@ export class WatchService {
       topUp: rolled.filter((row) => row.needsTopUp).length,
       clients: rolled.length,
     };
+  }
+
+  /**
+   * Weekday pulse only. START bounce-protection holds (activity log or
+   * Watchdog stamp) that still have a client, mailboxes, and remaining leads.
+   */
+  private async resumeBounceHolds(input: {
+    campaigns: SmartleadCampaign[];
+    clientsById: Map<number, SmartleadClientRecord>;
+    supabaseCampaigns: Map<number, CampaignNameRow>;
+    registry: Map<number, string>;
+    now: Date;
+    timeZone: string;
+  }): Promise<number> {
+    if (!this.config.autoResumeBounceHolds) return 0;
+
+    let fromLogs = new Set<number>();
+    if (this.supabase.enabled()) {
+      try {
+        fromLogs = await this.supabase.fetchBounceHoldCampaignIds();
+      } catch (error) {
+        console.warn(
+          "[watchdog] bounce-hold activity logs:",
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+
+    const rules = {
+      enabled: true,
+      excludeIds: this.config.bounceResumeExcludeIds,
+      now: input.now,
+      timeZone: input.timeZone,
+    };
+    const cheap: Array<{ campaign: SmartleadCampaign; candidate: BounceResumeCandidate }> = [];
+    for (const campaign of input.campaigns) {
+      if (String(campaign.status ?? "").toUpperCase() !== "PAUSED") continue;
+      const resolved = resolveClient(
+        campaign,
+        input.clientsById,
+        input.supabaseCampaigns,
+        input.registry,
+      );
+      const candidate: BounceResumeCandidate = {
+        id: campaign.id,
+        name: campaign.name,
+        status: campaign.status,
+        clientId: resolved.clientId,
+        pausedReason: pausedReasonFrom(campaign),
+        lastAutobounceAlertAt: this.state.snapshot(campaign.id).lastAutobounceAlertAt,
+        fromActivityLog: fromLogs.has(campaign.id),
+      };
+      const skip = bounceResumeSkipReason(candidate, rules);
+      if (skip) continue;
+      cheap.push({ campaign, candidate });
+    }
+
+    let started = 0;
+    for (const { campaign, candidate } of cheap) {
+      try {
+        const [accounts, analytics] = await Promise.all([
+          this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []),
+          this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null),
+        ]);
+        const linked =
+          accounts.filter((account) => account.id > 0).length ||
+          parseLinkedInboxCount(campaign) ||
+          0;
+        const remaining = parseCampaignLeadStats(analytics)?.remaining ?? 0;
+        const ready: BounceResumeCandidate = {
+          ...candidate,
+          linkedMailboxes: linked,
+          remainingLeads: remaining,
+        };
+        const skip = bounceResumeSkipReason(ready, rules);
+        if (skip) continue;
+        await this.smartlead.updateCampaignStatus(campaign.id, "START");
+        campaign.status = "ACTIVE";
+        started += 1;
+      } catch (error) {
+        console.warn(
+          `[watchdog] resume #${campaign.id} ${campaign.name}:`,
+          error instanceof Error ? error.message : error,
+        );
+      }
+      await sleep(200);
+    }
+    return started;
   }
 
   private async collectActiveClientRows(now: Date, day: string): Promise<VolumeCampaignInput[]> {

@@ -399,6 +399,8 @@ export function formatClientPulse(input: {
   offTrack?: OffTrackPulseRow[];
   exclude?: PulseExclude;
   mentionUserIds?: Iterable<string>;
+  /** Successful weekday START count. Omit the Slack line when 0 / unset. */
+  unpausedBounceHolds?: number;
 }): string {
   const totalSent = input.clients.reduce((sum, row) => sum + row.sent, 0);
   const totalBounced = input.clients.reduce((sum, row) => sum + row.bounced, 0);
@@ -416,6 +418,9 @@ export function formatClientPulse(input: {
     `Total ${totalSent.toLocaleString()} sent` +
       (overall != null ? ` · ${formatPct(overall)} bounce` : ""),
   );
+  if ((input.unpausedBounceHolds ?? 0) > 0) {
+    lines.push(`Unpaused ${input.unpausedBounceHolds} bounce holds`);
+  }
   const paused = visiblePausedRows(input.paused ?? [], input.exclude);
   if (paused.length) {
     lines.push(`Paused: ${paused.length} (new pauses still alert via 15m watch)`);
