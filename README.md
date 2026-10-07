@@ -22,7 +22,7 @@ Pulse does **not** dump Off track / too-few-leads / runway essays. Mentions fire
 On each weekday pulse (same `PULSE_CRON`, still Mon–Fri only), before the sent-today rollup:
 
 1. Find `PAUSED` campaigns whose `campaign_activity_logs.paused_reason` is bounce protection, or that have a Watchdog `lastAutobounceAlertAt` stamp.
-2. Skip `BOUNCE_RESUME_EXCLUDE_IDS` (defaults: `3977481,3977483,3977484,3977485,3969268,3739316,4085158,4085159,4085160,3921647,3921651,4041409`), Goliath client `548611` through `2026-10-15`, campaigns with 0 linked mailboxes or 0 remaining leads, and campaigns with no client (canary shells).
+2. Skip `BOUNCE_RESUME_EXCLUDE_IDS` (defaults: `3977481,3977483,3977484,3977485,3969268,3739316,4085158,4085159,4085160`), Goliath client `548611` through `2026-10-15`, campaigns with 0 linked mailboxes or 0 remaining leads, and campaigns with no client (canary shells).
 3. `POST` Smartlead status `START` for each remaining campaign.
 4. Add `Unpaused N bounce holds` to the pulse when N &gt; 0.
 

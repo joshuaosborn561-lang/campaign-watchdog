@@ -71,8 +71,14 @@ describe("bounce-resume selection", () => {
   });
 
   it("skips exclude-list IDs, Goliath through the hold date, empty lists, and no-client shells", () => {
+    assert.deepEqual(DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS, [
+      3977481, 3977483, 3977484, 3977485, 3969268, 3739316, 4085158, 4085159, 4085160,
+    ]);
     const excluded = DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS[0];
     assert.equal(bounceResumeSkipReason(hold({ id: excluded }), rules()), "excluded id");
+    for (const id of [3921647, 3921651, 4041409]) {
+      assert.equal(bounceResumeSkipReason(hold({ id }), rules()), null);
+    }
     assert.equal(
       bounceResumeSkipReason(
         hold({ id: 10, clientId: GOLIATH_BOUNCE_RESUME_CLIENT_ID, name: "Goliath Displacement" }),

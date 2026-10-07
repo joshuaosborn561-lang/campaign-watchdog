@@ -4,8 +4,7 @@ import { ymdInZone } from "./time.js";
 
 /** Leftover / holdout Smartlead IDs — never auto-START these bounce holds. */
 export const DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS = [
-  3977481, 3977483, 3977484, 3977485, 3969268, 3739316, 4085158, 4085159, 4085160, 3921647,
-  3921651, 4041409,
+  3977481, 3977483, 3977484, 3977485, 3969268, 3739316, 4085158, 4085159, 4085160,
 ];
 
 /** Goliath Cybersecurity — hold bounce-resume through this Chicago date (inclusive). */

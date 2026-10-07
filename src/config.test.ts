@@ -41,7 +41,13 @@ describe("loadConfig", () => {
     assert.equal(config.eodHour, 17);
     assert.equal(config.autoResumeBounceHolds, true);
     assert.deepEqual(config.bounceResumeExcludeIds, DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS);
+    assert.deepEqual(config.bounceResumeExcludeIds, [
+      3977481, 3977483, 3977484, 3977485, 3969268, 3739316, 4085158, 4085159, 4085160,
+    ]);
     assert.ok(config.bounceResumeExcludeIds.includes(3739316));
+    assert.equal(config.bounceResumeExcludeIds.includes(3921647), false);
+    assert.equal(config.bounceResumeExcludeIds.includes(3921651), false);
+    assert.equal(config.bounceResumeExcludeIds.includes(4041409), false);
   });
 
   it("reads the bounce-resume kill switch and exclude-id override", () => {
