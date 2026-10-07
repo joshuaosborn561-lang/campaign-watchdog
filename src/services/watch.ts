@@ -14,6 +14,7 @@ import type { SlackClient } from "../clients/slack.js";
 import type { CampaignNameRow, SupabaseStore } from "../clients/supabase.js";
 import { detectAutobounce } from "../lib/autobounce.js";
 import {
+  bounceResumePrefilterSkipReason,
   bounceResumeSkipReason,
   pausedReasonFrom,
   type BounceResumeCandidate,
@@ -196,10 +197,8 @@ export class WatchService {
 
     const { day, hour, slot } = resolved;
     const key = `pulse:v3:${slot}`;
-    if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
-      this.state.setLastPulseSlot(slot);
-      return { posted: false, clients: 0, under: 0, paused: 0, unpaused: 0 };
-    }
+    const slotCardAlreadyPosted =
+      this.state.lastPulseSlot() === slot || (await this.alreadySent(key));
 
     const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
     const clientsById = new Map(clients.map((client) => [client.id, client]));
@@ -211,6 +210,21 @@ export class WatchService {
       now,
       timeZone,
     });
+    if (slotCardAlreadyPosted) {
+      this.state.setLastPulseSlot(slot);
+      if (unpaused > 0) {
+        await this.notify(`Unpaused ${unpaused} bounce holds`, {
+          key: `pulse:bounce-resume:${slot}:${unpaused}`,
+          campaignId: 0,
+          clientName: "All clients",
+          campaignName: `Bounce resume ${slot}`,
+          kind: "pulse-bounce-resume",
+          payload: { slot, unpaused },
+        });
+      }
+      await this.state.save();
+      return { posted: false, clients: 0, under: 0, paused: 0, unpaused };
+    }
     const pulseExclude = {
       ids: this.config.pulseExcludeCampaignIds,
       names: this.config.pulseExcludeCampaignNames,
@@ -467,8 +481,9 @@ export class WatchService {
   }
 
   /**
-   * Weekday pulse only. START bounce-protection holds (activity log or
-   * Watchdog stamp) that still have a client, mailboxes, and remaining leads.
+   * Weekday pulse only. START bounce holds (activity log, Watchdog stamp, or
+   * analytics-detected autobounce) that still have a client, mailboxes, and
+   * remaining leads. A cheap prefilter runs before any Smartlead fetches.
    */
   private async resumeBounceHolds(input: {
     campaigns: SmartleadCampaign[];
@@ -500,7 +515,6 @@ export class WatchService {
     };
     const cheap: Array<{ campaign: SmartleadCampaign; candidate: BounceResumeCandidate }> = [];
     for (const campaign of input.campaigns) {
-      if (String(campaign.status ?? "").toUpperCase() !== "PAUSED") continue;
       const resolved = resolveClient(
         campaign,
         input.clientsById,
@@ -510,24 +524,34 @@ export class WatchService {
       const candidate: BounceResumeCandidate = {
         id: campaign.id,
         name: campaign.name,
-        status: campaign.status,
+        status: campaign.status ?? "",
         clientId: resolved.clientId,
         pausedReason: pausedReasonFrom(campaign),
         lastAutobounceAlertAt: this.state.snapshot(campaign.id).lastAutobounceAlertAt,
         fromActivityLog: fromLogs.has(campaign.id),
       };
-      const skip = bounceResumeSkipReason(candidate, rules);
-      if (skip) continue;
+      if (bounceResumePrefilterSkipReason(candidate, rules) != null) continue;
       cheap.push({ campaign, candidate });
     }
 
     let started = 0;
     for (const { campaign, candidate } of cheap) {
       try {
-        const [accounts, analytics] = await Promise.all([
+        const [detail, accounts, analytics, settings] = await Promise.all([
+          this.smartlead.getCampaign(campaign.id).catch(() => campaign),
           this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []),
           this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null),
+          this.smartlead.getCampaignSettings(campaign.id).catch(() => null),
         ]);
+        candidate.pausedReason = pausedReasonFrom(detail) ?? candidate.pausedReason;
+        candidate.autobounce = detectAutobounce({
+          status: campaign.status ?? "PAUSED",
+          campaign: detail,
+          settings,
+          analytics,
+          fallbackThreshold: this.config.bounceAutoPauseThreshold,
+          minSample: this.config.minBounceSample,
+        }).autobounce;
         const linked =
           accounts.filter((account) => account.id > 0).length ||
           parseLinkedInboxCount(campaign) ||

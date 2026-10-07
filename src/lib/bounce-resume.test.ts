@@ -4,6 +4,7 @@ import {
   DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS,
   GOLIATH_BOUNCE_RESUME_CLIENT_ID,
   GOLIATH_BOUNCE_RESUME_HOLD_THROUGH,
+  bounceResumePrefilterSkipReason,
   bounceResumeSkipReason,
   isBounceHold,
   isBounceProtectionReason,
@@ -75,7 +76,7 @@ describe("bounce-resume selection", () => {
       3977481, 3977483, 3977484, 3977485, 3969268, 3739316, 4085158, 4085159, 4085160,
     ]);
     const excluded = DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS[0];
-    assert.equal(bounceResumeSkipReason(hold({ id: excluded }), rules()), "excluded id");
+    assert.equal(bounceResumeSkipReason(hold({ id: excluded }), rules()), "exclude");
     for (const id of [3921647, 3921651, 4041409]) {
       assert.equal(bounceResumeSkipReason(hold({ id }), rules()), null);
     }
@@ -84,7 +85,7 @@ describe("bounce-resume selection", () => {
         hold({ id: 10, clientId: GOLIATH_BOUNCE_RESUME_CLIENT_ID, name: "Goliath Displacement" }),
         rules(),
       ),
-      "goliath hold",
+      "goliath",
     );
     assert.equal(
       bounceResumeSkipReason(
@@ -96,7 +97,7 @@ describe("bounce-resume selection", () => {
     assert.equal(GOLIATH_BOUNCE_RESUME_HOLD_THROUGH, "2026-10-15");
     assert.equal(bounceResumeSkipReason(hold({ id: 11, linkedMailboxes: 0 }), rules()), "no mailboxes");
     assert.equal(bounceResumeSkipReason(hold({ id: 12, remainingLeads: 0 }), rules()), "no leads");
-    assert.equal(bounceResumeSkipReason(hold({ id: 13, clientId: null, name: "Untagged leftover" }), rules()), "no client");
+    assert.equal(bounceResumeSkipReason(hold({ id: 13, clientId: null, name: "Untagged leftover" }), rules()), "no-client");
     assert.equal(
       bounceResumeSkipReason(hold({ id: 14, name: "Canary shell: #1 probe", clientId: 542838 }), rules()),
       "noise",
@@ -108,7 +109,73 @@ describe("bounce-resume selection", () => {
   });
 
   it("honors the AUTO_RESUME_BOUNCE_HOLDS kill switch", () => {
-    assert.equal(bounceResumeSkipReason(hold({ id: 99 }), rules({ enabled: false })), "disabled");
+    assert.equal(bounceResumeSkipReason(hold({ id: 99 }), rules({ enabled: false })), "enabled");
     assert.deepEqual(selectBounceHoldsToResume([hold({ id: 99 })], rules({ enabled: false })), []);
+  });
+
+  it("treats autobounce:true as a bounce hold", () => {
+    assert.equal(
+      isBounceHold(hold({ id: 20, pausedReason: null, autobounce: true })),
+      true,
+    );
+    assert.equal(
+      isBounceHold(hold({ id: 21, pausedReason: "operator", autobounce: false })),
+      false,
+    );
+  });
+
+  it("resumes an analytics-only (Insight-style) autobounce hold with no reason or stamp", () => {
+    const candidate = hold({ id: 22, pausedReason: null, autobounce: true });
+    assert.equal(bounceResumeSkipReason(candidate, rules()), null);
+    assert.deepEqual(
+      selectBounceHoldsToResume([candidate], rules()).map((row) => row.id),
+      [22],
+    );
+  });
+
+  it("prefilter rejects exclude IDs through 2026-10-15 only", () => {
+    const excluded = DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS[0];
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: excluded }), rules()), "exclude");
+    assert.equal(
+      bounceResumePrefilterSkipReason(hold({ id: excluded, autobounce: true }), rules()),
+      "exclude",
+    );
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: 99 }), rules()), null);
+  });
+
+  it("prefilter rejects Goliath through 2026-10-15 and releases after", () => {
+    const goliath = hold({ id: 10, clientId: GOLIATH_BOUNCE_RESUME_CLIENT_ID, name: "Goliath Displacement" });
+    assert.equal(bounceResumePrefilterSkipReason(goliath, rules()), "goliath");
+    assert.equal(
+      bounceResumePrefilterSkipReason(goliath, rules({ now: new Date("2026-10-15T15:00:00.000Z") })),
+      "goliath",
+    );
+    assert.equal(bounceResumePrefilterSkipReason(goliath, rules({ now: afterHold })), null);
+  });
+
+  it("prefilter checks only enabled, paused, noise, exclude, no-client, goliath", () => {
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: 30 }), rules({ enabled: false })), "enabled");
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: 31, status: "ACTIVE" }), rules()), "paused");
+    assert.equal(
+      bounceResumePrefilterSkipReason(hold({ id: 32, name: "Canary shell: #1 probe" }), rules()),
+      "noise",
+    );
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: 33, clientId: null }), rules()), "no-client");
+    // Not a bounce hold, no mailboxes, no leads — prefilter does not care.
+    assert.equal(
+      bounceResumePrefilterSkipReason(
+        hold({ id: 34, pausedReason: "operator", linkedMailboxes: 0, remainingLeads: 0 }),
+        rules(),
+      ),
+      null,
+    );
+  });
+
+  it("bounceResumeSkipReason runs prefilter, then isBounceHold, then mailboxes/leads", () => {
+    assert.equal(bounceResumeSkipReason(hold({ id: 40, clientId: null, pausedReason: "operator" }), rules()), "no-client");
+    assert.equal(bounceResumeSkipReason(hold({ id: 41, pausedReason: "operator", linkedMailboxes: 0 }), rules()), "not a bounce hold");
+    assert.equal(bounceResumeSkipReason(hold({ id: 42, linkedMailboxes: 0, remainingLeads: 0 }), rules()), "no mailboxes");
+    assert.equal(bounceResumeSkipReason(hold({ id: 43, remainingLeads: 0 }), rules()), "no leads");
+    assert.equal(bounceResumeSkipReason(hold({ id: 44, autobounce: true, pausedReason: null }), rules()), null);
   });
 });
