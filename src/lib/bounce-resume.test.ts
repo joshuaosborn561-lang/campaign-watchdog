@@ -90,7 +90,7 @@ describe("bounce-resume selection", () => {
     assert.equal(GOLIATH_BOUNCE_RESUME_HOLD_THROUGH, "2026-10-15");
     assert.equal(bounceResumeSkipReason(hold({ id: 11, linkedMailboxes: 0 }), rules()), "no mailboxes");
     assert.equal(bounceResumeSkipReason(hold({ id: 12, remainingLeads: 0 }), rules()), "no leads");
-    assert.equal(bounceResumeSkipReason(hold({ id: 13, clientId: null, name: "Canary leftover" }), rules()), "no client");
+    assert.equal(bounceResumeSkipReason(hold({ id: 13, clientId: null, name: "Untagged leftover" }), rules()), "no client");
     assert.equal(
       bounceResumeSkipReason(hold({ id: 14, name: "Canary shell: #1 probe", clientId: 542838 }), rules()),
       "noise",
