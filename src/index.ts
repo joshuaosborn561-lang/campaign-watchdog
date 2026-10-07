@@ -95,7 +95,7 @@ async function main(): Promise<void> {
       await state.load();
       const pulse = await watch.runPulse(firedAt);
       console.log(
-        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} under=${pulse.under} paused=${pulse.paused}`,
+        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} under=${pulse.under} paused=${pulse.paused} unpaused=${pulse.unpaused}`,
       );
     } catch (error) {
       console.error("[watchdog] pulse failed", error);

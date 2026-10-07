@@ -43,6 +43,33 @@ export class SupabaseStore {
     return map;
   }
 
+  /**
+   * Smartlead IDs whose latest `campaign_activity_logs.paused_reason` is bounce
+   * protection. Missing table / columns is not fatal — Watchdog stamps still work.
+   */
+  async fetchBounceHoldCampaignIds(): Promise<Set<number>> {
+    try {
+      const rows = await this.select<{
+        campaign_id?: number | null;
+        smartlead_campaign_id?: number | null;
+        campaignId?: number | null;
+        paused_reason?: string | null;
+      }>(
+        "campaign_activity_logs",
+        "campaign_id,smartlead_campaign_id,paused_reason",
+        "paused_reason=ilike.*bounce*",
+      );
+      const ids = new Set<number>();
+      for (const row of rows) {
+        const id = Number(row.campaign_id ?? row.smartlead_campaign_id ?? row.campaignId);
+        if (Number.isFinite(id) && id > 0) ids.add(id);
+      }
+      return ids;
+    } catch {
+      return new Set();
+    }
+  }
+
   async hasAlert(key: string): Promise<boolean> {
     const rows = await this.select<{ alert_key: string }>(
       "campaign_watchdog_alerts",

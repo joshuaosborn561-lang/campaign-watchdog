@@ -64,8 +64,29 @@ describe("client pulse", () => {
     assert.match(text, /\*Culture Fits\* — 0 sent/);
     assert.match(text, /Total 145 sent · 4\.1% bounce/);
     assert.doesNotMatch(text, /Paused/);
+    assert.doesNotMatch(text, /Unpaused/);
     assert.doesNotMatch(text, /<@/);
     assert.doesNotMatch(text, /\*under\*/);
+  });
+
+  it("adds Unpaused N bounce holds only when N is above zero", () => {
+    const none = formatClientPulse({
+      day: "2026-10-07",
+      hour: 10,
+      bounceWarn: 5,
+      unpausedBounceHolds: 0,
+      clients: [{ clientName: "Bolder Cyber Partners", sent: 12, bounced: 0 }],
+    });
+    assert.doesNotMatch(none, /Unpaused/);
+
+    const some = formatClientPulse({
+      day: "2026-10-07",
+      hour: 10,
+      bounceWarn: 5,
+      unpausedBounceHolds: 3,
+      clients: [{ clientName: "Bolder Cyber Partners", sent: 12, bounced: 0 }],
+    });
+    assert.match(some, /Unpaused 3 bounce holds/);
   });
 
   it("flags *under* and mentions Cayden + Josh only when a client is under", () => {

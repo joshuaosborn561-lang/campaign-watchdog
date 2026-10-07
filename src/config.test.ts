@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { loadConfig } from "./config.js";
+import { DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS } from "./lib/bounce-resume.js";
 import {
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
@@ -38,6 +39,20 @@ describe("loadConfig", () => {
     assert.equal(config.volumeAlertMax, 1080);
     assert.equal(config.eodCron, "30 17 * * 1-5");
     assert.equal(config.eodHour, 17);
+    assert.equal(config.autoResumeBounceHolds, true);
+    assert.deepEqual(config.bounceResumeExcludeIds, DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS);
+    assert.ok(config.bounceResumeExcludeIds.includes(3739316));
+  });
+
+  it("reads the bounce-resume kill switch and exclude-id override", () => {
+    const off = loadConfig({
+      SMARTLEAD_API_KEY: "sl-key",
+      SLACK_BOT_TOKEN: "xoxb-test",
+      AUTO_RESUME_BOUNCE_HOLDS: "0",
+      BOUNCE_RESUME_EXCLUDE_IDS: "11,22",
+    } as NodeJS.ProcessEnv);
+    assert.equal(off.autoResumeBounceHolds, false);
+    assert.deepEqual(off.bounceResumeExcludeIds, [11, 22]);
   });
 
   it("reads Slack mention ids from env", () => {

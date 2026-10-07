@@ -1,3 +1,4 @@
+import { DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS } from "./lib/bounce-resume.js";
 import {
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
@@ -216,6 +217,8 @@ export interface AppConfig {
   heyreachWeekdays: number[];
   pulseExcludeCampaignIds: number[];
   pulseExcludeCampaignNames: string[];
+  autoResumeBounceHolds: boolean;
+  bounceResumeExcludeIds: number[];
   volumeCron: string;
   volumeHour: number;
   volumeWeekdays: number[];
@@ -277,6 +280,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       pulseExcludeCampaignNames: csvOrNewlineStrings(
         "PULSE_EXCLUDE_CAMPAIGN_NAMES",
         DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
+      ),
+      autoResumeBounceHolds: optionalBool("AUTO_RESUME_BOUNCE_HOLDS", true),
+      bounceResumeExcludeIds: csvNumbers(
+        "BOUNCE_RESUME_EXCLUDE_IDS",
+        DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS,
       ),
       volumeCron: optional("VOLUME_CRON", "10 12 * * 1-5"),
       volumeHour: optionalNumber("VOLUME_HOUR", VOLUME_SLOT_HOUR),
