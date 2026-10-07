@@ -26,6 +26,12 @@ On each weekday pulse (same `PULSE_CRON`, still Mon–Fri only), before the sent
 3. `POST` Smartlead status `START` for each remaining campaign.
 4. Add `Unpaused N bounce holds` to the pulse when N &gt; 0.
 
+**Analytics-based detection.** Cheap checks (enabled, paused, noise, exclude list, client, Goliath) run first. For the campaigns that survive, Watchdog fetches the campaign, its email accounts, analytics, and settings. A paused campaign whose bounce rate is at or over the autobounce threshold (`BOUNCE_AUTO_PAUSE_THRESHOLD`, with at least `MIN_BOUNCE_SAMPLE` sends) is detected as an autobounce hold even without an activity-log reason or a Watchdog stamp.
+
+**Mid-slot resume.** The pulse cron still runs bounce-hold resume when this slot's pulse message has already posted (`lastPulseSlot` matches the current slot). If any holds are started, Watchdog sends a separate `Unpaused N bounce holds` alert under its own alert key. It does not wait two hours and does not repost the pulse.
+
+**Insight-style holds.** Campaigns held by Smartlead autobounce, such as the Insight campaigns, resume even when `lastPulseSlot` already matches the current slot.
+
 Kill switch: `AUTO_RESUME_BOUNCE_HOLDS` (default `true`). Weekend pulses still no-op.
 
 ## What no longer posts

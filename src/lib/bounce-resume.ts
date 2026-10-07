@@ -19,6 +19,8 @@ export interface BounceResumeCandidate {
   pausedReason?: string | null;
   lastAutobounceAlertAt?: string;
   fromActivityLog?: boolean;
+  /** Detected from analytics (bounce rate over threshold) while paused. */
+  autobounce?: boolean;
   linkedMailboxes?: number | null;
   remainingLeads?: number | null;
 }
@@ -71,21 +73,21 @@ export function isBounceHold(candidate: BounceResumeCandidate): boolean {
   return Boolean(
     candidate.fromActivityLog ||
       candidate.lastAutobounceAlertAt ||
+      candidate.autobounce === true ||
       isBounceProtectionReason(candidate.pausedReason),
   );
 }
 
 /**
- * Why this bounce hold should stay paused. `null` means START it.
- * Mailbox / remaining checks apply only after those fields are known.
+ * Cheap checks that do not depend on the bounce-hold signal, mailbox count, or
+ * remaining leads. `null` means the campaign is worth fetching details for.
  */
-export function bounceResumeSkipReason(
+export function bounceResumePrefilterSkipReason(
   candidate: BounceResumeCandidate,
   rules: BounceResumeRules,
 ): string | null {
   if (!rules.enabled) return "disabled";
   if (String(candidate.status ?? "PAUSED").toUpperCase() !== "PAUSED") return "not paused";
-  if (!isBounceHold(candidate)) return "not a bounce hold";
   if (isNoiseCampaign(candidate.name)) return "noise";
   if (new Set(rules.excludeIds).has(candidate.id)) return "excluded id";
   if (candidate.clientId == null) return "no client";
@@ -97,6 +99,20 @@ export function bounceResumeSkipReason(
   ) {
     return "goliath hold";
   }
+  return null;
+}
+
+/**
+ * Why this bounce hold should stay paused. `null` means START it.
+ * Mailbox / remaining checks apply only after those fields are known.
+ */
+export function bounceResumeSkipReason(
+  candidate: BounceResumeCandidate,
+  rules: BounceResumeRules,
+): string | null {
+  const prefilter = bounceResumePrefilterSkipReason(candidate, rules);
+  if (prefilter) return prefilter;
+  if (!isBounceHold(candidate)) return "not a bounce hold";
   if (candidate.linkedMailboxes != null && candidate.linkedMailboxes <= 0) {
     return "no mailboxes";
   }
