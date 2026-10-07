@@ -14,6 +14,7 @@ import type { SlackClient } from "../clients/slack.js";
 import type { CampaignNameRow, SupabaseStore } from "../clients/supabase.js";
 import { detectAutobounce } from "../lib/autobounce.js";
 import {
+  bounceResumePrefilterSkipReason,
   bounceResumeSkipReason,
   pausedReasonFrom,
   type BounceResumeCandidate,
@@ -196,10 +197,8 @@ export class WatchService {
 
     const { day, hour, slot } = resolved;
     const key = `pulse:v3:${slot}`;
-    if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
-      this.state.setLastPulseSlot(slot);
-      return { posted: false, clients: 0, under: 0, paused: 0, unpaused: 0 };
-    }
+    const alreadyPosted =
+      this.state.lastPulseSlot() === slot || (await this.alreadySent(key));
 
     const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
     const clientsById = new Map(clients.map((client) => [client.id, client]));
@@ -211,6 +210,24 @@ export class WatchService {
       now,
       timeZone,
     });
+
+    if (alreadyPosted) {
+      // The slot's pulse already went out; still resume holds and say so
+      // separately instead of waiting two hours for the next slot.
+      this.state.setLastPulseSlot(slot);
+      if (unpaused > 0) {
+        await this.notify(`Unpaused ${unpaused} bounce holds`, {
+          key: `pulse:bounce-resume:${slot}:${now.toISOString()}`,
+          campaignId: 0,
+          clientName: "All clients",
+          campaignName: `Bounce resume ${slot}`,
+          kind: "bounce_resume",
+          payload: { day, hour, slot, unpaused },
+        });
+      }
+      await this.state.save();
+      return { posted: false, clients: 0, under: 0, paused: 0, unpaused };
+    }
     const pulseExclude = {
       ids: this.config.pulseExcludeCampaignIds,
       names: this.config.pulseExcludeCampaignNames,
@@ -516,7 +533,7 @@ export class WatchService {
         lastAutobounceAlertAt: this.state.snapshot(campaign.id).lastAutobounceAlertAt,
         fromActivityLog: fromLogs.has(campaign.id),
       };
-      const skip = bounceResumeSkipReason(candidate, rules);
+      const skip = bounceResumePrefilterSkipReason(candidate, rules);
       if (skip) continue;
       cheap.push({ campaign, candidate });
     }
@@ -524,10 +541,21 @@ export class WatchService {
     let started = 0;
     for (const { campaign, candidate } of cheap) {
       try {
-        const [accounts, analytics] = await Promise.all([
+        const [detail, accounts, analytics, settings] = await Promise.all([
+          this.smartlead.getCampaign(campaign.id).catch(() => null),
           this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []),
           this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null),
+          this.smartlead.getCampaignSettings(campaign.id).catch(() => null),
         ]);
+        const pausedReason = pausedReasonFrom(detail) ?? candidate.pausedReason;
+        const verdict = detectAutobounce({
+          status: String(campaign.status ?? "PAUSED"),
+          campaign: detail ?? campaign,
+          settings,
+          analytics,
+          fallbackThreshold: this.config.bounceAutoPauseThreshold,
+          minSample: this.config.minBounceSample,
+        });
         const linked =
           accounts.filter((account) => account.id > 0).length ||
           parseLinkedInboxCount(campaign) ||
@@ -535,6 +563,8 @@ export class WatchService {
         const remaining = parseCampaignLeadStats(analytics)?.remaining ?? 0;
         const ready: BounceResumeCandidate = {
           ...candidate,
+          pausedReason,
+          autobounce: verdict.autobounce,
           linkedMailboxes: linked,
           remainingLeads: remaining,
         };

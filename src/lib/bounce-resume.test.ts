@@ -4,6 +4,7 @@ import {
   DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS,
   GOLIATH_BOUNCE_RESUME_CLIENT_ID,
   GOLIATH_BOUNCE_RESUME_HOLD_THROUGH,
+  bounceResumePrefilterSkipReason,
   bounceResumeSkipReason,
   isBounceHold,
   isBounceProtectionReason,
@@ -105,6 +106,62 @@ describe("bounce-resume selection", () => {
       bounceResumeSkipReason(hold({ id: 15, pausedReason: "operator", lastAutobounceAlertAt: undefined }), rules()),
       "not a bounce hold",
     );
+  });
+
+  it("treats autobounce:true from analytics as a bounce hold", () => {
+    const quiet = hold({ id: 20, pausedReason: "operator", lastAutobounceAlertAt: undefined });
+    assert.equal(isBounceHold(quiet), false);
+    assert.equal(isBounceHold({ ...quiet, autobounce: true }), true);
+    assert.equal(isBounceHold({ ...quiet, autobounce: false }), false);
+    assert.equal(bounceResumeSkipReason({ ...quiet, autobounce: true }, rules()), null);
+  });
+
+  it("prefilter runs cheap checks without looking at the hold signal or counts", () => {
+    const quiet = { pausedReason: "operator", lastAutobounceAlertAt: undefined };
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: 30 }), rules({ enabled: false })), "disabled");
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: 31, status: "ACTIVE" }), rules()), "not paused");
+    assert.equal(
+      bounceResumePrefilterSkipReason(hold({ id: 32, name: "Canary shell: #1 probe" }), rules()),
+      "noise",
+    );
+    assert.equal(
+      bounceResumePrefilterSkipReason(hold({ id: DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS[0] }), rules()),
+      "excluded id",
+    );
+    assert.equal(bounceResumePrefilterSkipReason(hold({ id: 33, clientId: null }), rules()), "no client");
+    assert.equal(
+      bounceResumePrefilterSkipReason(
+        hold({ id: 34, clientId: GOLIATH_BOUNCE_RESUME_CLIENT_ID, name: "Goliath Displacement" }),
+        rules(),
+      ),
+      "goliath hold",
+    );
+    // Not a bounce hold, no mailboxes, no leads: the prefilter still passes.
+    assert.equal(
+      bounceResumePrefilterSkipReason(
+        hold({ id: 35, ...quiet, linkedMailboxes: 0, remainingLeads: 0 }),
+        rules(),
+      ),
+      null,
+    );
+  });
+
+  it("full skip reason layers hold / mailbox / leads on top of the prefilter", () => {
+    const quiet = { pausedReason: "operator", lastAutobounceAlertAt: undefined };
+    assert.equal(
+      bounceResumeSkipReason(hold({ id: 40, status: "ACTIVE" }), rules()),
+      "not paused",
+    );
+    assert.equal(bounceResumeSkipReason(hold({ id: 41, ...quiet }), rules()), "not a bounce hold");
+    assert.equal(
+      bounceResumeSkipReason(hold({ id: 42, ...quiet, autobounce: true, linkedMailboxes: 0 }), rules()),
+      "no mailboxes",
+    );
+    assert.equal(
+      bounceResumeSkipReason(hold({ id: 43, ...quiet, autobounce: true, remainingLeads: 0 }), rules()),
+      "no leads",
+    );
+    assert.equal(bounceResumeSkipReason(hold({ id: 44, ...quiet, autobounce: true }), rules()), null);
   });
 
   it("honors the AUTO_RESUME_BOUNCE_HOLDS kill switch", () => {

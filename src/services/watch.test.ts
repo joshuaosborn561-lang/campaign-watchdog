@@ -1217,6 +1217,180 @@ describe("WatchService Slack — bounce-hold auto-resume", () => {
     );
   });
 
+  const slotTue10 = "2026-09-01T10";
+  const pulseTue10 = new Date("2026-09-01T15:05:00.000Z");
+
+  it("prefilters before fetching, then enriches the cheap list with detail, accounts, analytics, and settings", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({ id: 3739316, name: "Cayden holdout", status: "PAUSED", client_id: BCP }),
+        campaign({ id: 301, name: "Untagged leftover", status: "PAUSED", client_id: null }),
+        campaign({ id: 302, name: "BCP Running", status: "ACTIVE", client_id: BCP }),
+        campaign({
+          id: 303,
+          name: "BCP Displacement Hold",
+          status: "PAUSED",
+          client_id: BCP,
+          paused_reason: "bounce protection",
+        }),
+      ],
+      clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+      analytics: { 303: remaining },
+    });
+    const calls: string[] = [];
+    const spied = {
+      ...smartlead,
+      getCampaign: async (id: number) => {
+        calls.push(`campaign:${id}`);
+        return smartlead.getCampaign(id);
+      },
+      getCampaignEmailAccounts: async (id: number) => {
+        calls.push(`accounts:${id}`);
+        return smartlead.getCampaignEmailAccounts(id);
+      },
+      getCampaignAnalytics: async (id: number) => {
+        calls.push(`analytics:${id}`);
+        return smartlead.getCampaignAnalytics(id);
+      },
+      getCampaignSettings: async (id: number) => {
+        calls.push(`settings:${id}`);
+        return smartlead.getCampaignSettings(id);
+      },
+    };
+    await withService(
+      spied,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch, state) => {
+        state.setLastPulseSlot(slotTue10);
+        const result = await watch.runPulse(pulseTue10);
+        assert.equal(result.unpaused, 1);
+        assert.deepEqual(calls.sort(), [
+          "accounts:303",
+          "analytics:303",
+          "campaign:303",
+          "settings:303",
+        ]);
+        assert.deepEqual(smartlead.started, [{ id: 303, status: "START" }]);
+      },
+    );
+  });
+
+  it("still resumes holds when the slot's pulse already posted, and sends a distinct alert", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({
+          id: 88,
+          name: "BCP Displacement Hold",
+          status: "PAUSED",
+          client_id: BCP,
+          paused_reason: "bounce protection",
+        }),
+      ],
+      clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+      analytics: { 88: remaining },
+    });
+    const alerts: string[] = [];
+    const supabase = {
+      ...fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      markAlert: async (alert: { key: string }) => {
+        alerts.push(alert.key);
+      },
+    };
+    await withService(smartlead, slack, supabase, async (watch, state) => {
+      state.setLastPulseSlot(slotTue10);
+      const result = await watch.runPulse(pulseTue10);
+      assert.equal(result.posted, false);
+      assert.equal(result.unpaused, 1);
+      assert.deepEqual(smartlead.started, [{ id: 88, status: "START" }]);
+      assert.deepEqual(slack.posted, ["Unpaused 1 bounce holds"]);
+      assert.equal(alerts.length, 1);
+      assert.match(alerts[0] ?? "", /^pulse:bounce-resume:/);
+      assert.notEqual(alerts[0], `pulse:v3:${slotTue10}`);
+    });
+  });
+
+  it("stays quiet on an already-posted slot when nothing was unpaused", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP })],
+      clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch, state) => {
+        state.setLastPulseSlot(slotTue10);
+        const result = await watch.runPulse(pulseTue10);
+        assert.equal(result.posted, false);
+        assert.equal(result.unpaused, 0);
+        assert.equal(slack.posted.length, 0);
+      },
+    );
+  });
+
+  it("STARTs an Insight-style hold detected from analytics with no stamp or reason, even mid-slot", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({ id: 4041409, name: "Insight Signal A", status: "PAUSED", client_id: BCP }),
+      ],
+      clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+      analytics: {
+        4041409: {
+          sent_count: 400,
+          bounce_count: 40,
+          total_count: "2000",
+          campaign_lead_stats: { total: 2000, notStarted: 800, inprogress: 200 },
+        },
+      },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch, state) => {
+        state.setLastPulseSlot(slotTue10);
+        assert.equal(state.snapshot(4041409).lastAutobounceAlertAt, undefined);
+        const result = await watch.runPulse(pulseTue10);
+        assert.equal(result.unpaused, 1);
+        assert.deepEqual(smartlead.started, [{ id: 4041409, status: "START" }]);
+        assert.equal(state.snapshot(4041409).lastAutobounceAlertAt, undefined);
+        assert.match(slack.posted[0] ?? "", /Unpaused 1 bounce holds/);
+      },
+    );
+  });
+
+  it("does not START a manual pause whose bounce rate is under the threshold", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [campaign({ id: 410, name: "Manual pause", status: "PAUSED", client_id: BCP })],
+      clients: [{ id: BCP, logo: "Bolder Cyber Partners" }],
+      analytics: {
+        410: {
+          sent_count: 400,
+          bounce_count: 4,
+          total_count: "2000",
+          campaign_lead_stats: { total: 2000, notStarted: 800, inprogress: 200 },
+        },
+      },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Bolder Cyber Partners"]]) }),
+      async (watch, state) => {
+        state.setLastPulseSlot(slotTue10);
+        const result = await watch.runPulse(pulseTue10);
+        assert.equal(result.unpaused, 0);
+        assert.deepEqual(smartlead.started, []);
+      },
+    );
+  });
+
   it("does not START when AUTO_RESUME_BOUNCE_HOLDS is off", async () => {
     const slack = fakeSlack();
     const smartlead = fakeSmartlead({
