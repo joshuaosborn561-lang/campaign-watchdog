@@ -109,7 +109,7 @@ export class SmartleadClient {
     });
   }
 
-  updateCampaignStatus(
+  async updateCampaignStatus(
     campaignId: number,
     status: SmartleadCampaignStatusWrite,
   ): Promise<unknown> {
