@@ -41,8 +41,9 @@ export interface UnderReason {
 
 /**
  * Single primary cause for a client-level *under* flag.
- * Priority: hopper too thin to hit the day → inbox staffing → bounce hold →
+ * Priority: hopper too thin to hit the day → inbox staffing → high bounce →
  * paused lists → daily cap → outside the send window → pace fallback.
+ * High bounce is an *under* explanation only — Watchdog never pauses or stops.
  */
 export function explainUnderVolume(input: UnderReasonSignals): UnderReason {
   const alertMax = input.alertMax ?? DEFAULT_ALERT_MAX;
@@ -101,8 +102,8 @@ export function explainUnderVolume(input: UnderReasonSignals): UnderReason {
       kind: "bounce",
       text:
         bounceRate != null && bounceRate > 0
-          ? `bounce hold (${bounceRate.toFixed(1)}%)`
-          : "bounce rate / bounce hold",
+          ? `high bounce (${bounceRate.toFixed(1)}%)`
+          : "high bounce rate",
     };
   }
 

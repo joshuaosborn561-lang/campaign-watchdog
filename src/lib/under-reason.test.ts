@@ -44,7 +44,7 @@ describe("explainUnderVolume", () => {
     );
   });
 
-  it("picks bounce hold when today's bounce is over the warn line", () => {
+  it("picks high bounce when today's bounce is over the warn line (alert copy only)", () => {
     assert.deepEqual(
       explainUnderVolume({
         sent: 200,
@@ -52,7 +52,7 @@ describe("explainUnderVolume", () => {
         attached: 40,
         bounced: 16,
       }),
-      { kind: "bounce", text: "bounce hold (8.0%)" },
+      { kind: "bounce", text: "high bounce (8.0%)" },
     );
     assert.deepEqual(
       explainUnderVolume({
@@ -61,7 +61,7 @@ describe("explainUnderVolume", () => {
         attached: 40,
         bounceHold: true,
       }),
-      { kind: "bounce", text: "bounce rate / bounce hold" },
+      { kind: "bounce", text: "high bounce rate" },
     );
   });
 

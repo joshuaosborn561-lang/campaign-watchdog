@@ -84,7 +84,10 @@ export function bounceResumeSkipReason(
   rules: BounceResumeRules,
 ): string | null {
   if (!rules.enabled) return "disabled";
-  if (String(candidate.status ?? "PAUSED").toUpperCase() !== "PAUSED") return "not paused";
+  const status = String(candidate.status ?? "PAUSED").toUpperCase();
+  // Never START a STOPPED campaign — resume is PAUSED bounce holds only.
+  if (status === "STOPPED") return "stopped";
+  if (status !== "PAUSED") return "not paused";
   if (!isBounceHold(candidate)) return "not a bounce hold";
   if (isNoiseCampaign(candidate.name)) return "noise";
   if (new Set(rules.excludeIds).has(candidate.id)) return "excluded id";

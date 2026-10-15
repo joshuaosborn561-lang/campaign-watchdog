@@ -1,6 +1,8 @@
 # Campaign Watchdog
 
-Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GSAC`). No weekend posts or Monday catch-ups. Watchdog never changes campaign settings, restaffs senders, or spends money. The weekday 2-hour pulse can `START` bounce-protection holds (see below); it does not pause lists.
+Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GSAC`). No weekend posts or Monday catch-ups. Watchdog never changes campaign settings, restaffs senders, or spends money.
+
+**Hard rule:** Watchdog never pauses or stops a campaign, for any reason — not bounce rate, not a client-level hold, not `bounce_auto_pause_threshold`. The Smartlead client refuses `PAUSED` / `STOPPED` and logs the attempt. High bounce is Slack-only. The weekday 2-hour pulse can `START` bounce-protection holds that are already `PAUSED` (see below). It never `START`s a `STOPPED` campaign.
 
 ## What posts (final)
 
@@ -13,7 +15,7 @@ Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GS
 | HeyReach runway | Same 15-minute watch, weekdays only. `IN_PROGRESS` only. Call Followups `#530529` never alerts. | `*Client* — *Campaign* is nearly done (~5.8d LinkedIn runway, 21 left, 0 pending). Refill soon.` |
 | EOD | `EOD_CRON` default `30 17 * * 1-5` America/Chicago. Grace until ~6:30pm the same weekday. | `*EOD — Tue 9/1*` then `• *Client* \`#id\` — 720 / 1,200 · *under* — pace short of 1,200` plus `• *Client* — 3 low on leads` (counts only; omit clients at zero). |
 
-Pulse and midday flag `*under*` when projected &lt; 1,080 (more than 10% under the 1,200-send / 40-sender day). Pulse projection snaps to the slot hour (8/10/12/14/16). EOD compares actual sends to 1,200. Each `*under*` line appends one primary cause from live Smartlead signals already on that client (leads, inboxes, bounce hold, paused lists, daily cap, or outside send window — otherwise `pace short of 1,200`). No campaign dump. Low-on-leads is EOD-only: each ACTIVE list with remaining / 1,200 under 7 days counts as one; Josh will ask for names.
+Pulse and midday flag `*under*` when projected &lt; 1,080 (more than 10% under the 1,200-send / 40-sender day). Pulse projection snaps to the slot hour (8/10/12/14/16). EOD compares actual sends to 1,200. Each `*under*` line appends one primary cause from live Smartlead signals already on that client (leads, inboxes, high bounce, paused lists, daily cap, or outside send window — otherwise `pace short of 1,200`). High bounce is an alert phrase only — it does not pause lists. No campaign dump. Low-on-leads is EOD-only: each ACTIVE list with remaining / 1,200 under 7 days counts as one; Josh will ask for names.
 
 Pulse does **not** dump Off track / too-few-leads / runway essays. Mentions fire only when at least one pulse line is `*under*` — never on a clean pulse, and never for low-on-leads.
 
@@ -23,7 +25,7 @@ On each weekday pulse (same `PULSE_CRON`, still Mon–Fri only), before the sent
 
 1. Find `PAUSED` campaigns whose `campaign_activity_logs.paused_reason` is bounce protection, or that have a Watchdog `lastAutobounceAlertAt` stamp.
 2. Skip `BOUNCE_RESUME_EXCLUDE_IDS` (defaults: `3977481,3977483,3977484,3977485,3969268,3739316,4085158,4085159,4085160`), Goliath client `548611` through `2026-10-15`, campaigns with 0 linked mailboxes or 0 remaining leads, and campaigns with no client (canary shells).
-3. `POST` Smartlead status `START` for each remaining campaign.
+3. `POST` Smartlead status `START` for each remaining **PAUSED** campaign. Never `START` a `STOPPED` campaign.
 4. Add `Unpaused N bounce holds` to the pulse when N &gt; 0.
 
 Kill switch: `AUTO_RESUME_BOUNCE_HOLDS` (default `true`). Weekend pulses still no-op.
