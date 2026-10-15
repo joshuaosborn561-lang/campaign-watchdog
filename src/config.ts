@@ -256,6 +256,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       completionThresholds: csvNumbers("COMPLETION_THRESHOLDS", [50, 75, 90, 100]),
       sendShortfallAfterHour: optionalNumber("SEND_SHORTFALL_AFTER_HOUR", 17),
       sendShortfallTimezone: optional("SEND_SHORTFALL_TIMEZONE", "America/Chicago"),
+      // Slack / *under* warn line only. Never used to pause or stop a campaign.
       bounceAutoPauseThreshold: optionalNumber("BOUNCE_AUTO_PAUSE_THRESHOLD", 5),
       minBounceSample: optionalNumber("MIN_BOUNCE_SAMPLE", 20),
       cron: optional("CRON", "*/15 * * * *"),

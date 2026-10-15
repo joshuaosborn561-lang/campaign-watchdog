@@ -72,11 +72,15 @@ function fakeSmartlead(options: {
     getCampaignEmailAccounts: async (id: number) => options.emailAccounts?.[id] ?? defaultInbox,
     updateCampaignStatus: async (id: number, status: "START" | "PAUSED" | "STOPPED") => {
       started.push({ id, status });
+      if (status === "PAUSED" || status === "STOPPED") {
+        throw new Error(`test guard: refused ${status} for campaign ${id}`);
+      }
       const row = options.campaigns.find((campaign) => campaign.id === id);
       if (row && status === "START") row.status = "ACTIVE";
       return { ok: true, status };
     },
     started,
+    campaigns: options.campaigns,
   };
 }
 
@@ -1247,6 +1251,138 @@ describe("WatchService Slack — bounce-hold auto-resume", () => {
       },
       [],
       { AUTO_RESUME_BOUNCE_HOLDS: "0" },
+    );
+  });
+
+  it("does not START a STOPPED bounce-protection campaign", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({
+          id: 88,
+          name: "Client Displacement Hold",
+          status: "STOPPED",
+          client_id: BCP,
+          paused_reason: "bounce protection",
+        }),
+      ],
+      clients: [{ id: BCP, logo: "Client Logo" }],
+      analyticsByDate: {
+        88: { data: [{ date: "2026-09-01", sent_count: 0 }] },
+      },
+      analytics: { 88: remaining },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Client Logo"]]) }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.unpaused, 0);
+        assert.deepEqual(smartlead.started, []);
+        assert.equal(smartlead.started.some((row) => row.status !== "START"), false);
+      },
+    );
+  });
+});
+
+describe("WatchService never pauses or stops a campaign", () => {
+  const remaining = {
+    total_count: "2000",
+    campaign_lead_stats: { total: 2000, notStarted: 800, inprogress: 200 },
+  };
+
+  it("does not POST PAUSED or STOPPED when a client is at 8% bounce", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({ id: 10, name: "Client List A", client_id: BCP }),
+        campaign({ id: 11, name: "Client List B", client_id: BCP }),
+      ],
+      clients: [{ id: BCP, logo: "Client Logo" }],
+      analyticsByDate: {
+        10: { data: [{ date: "2026-09-01", sent_count: 125, bounce_count: 10 }] },
+        11: { data: [{ date: "2026-09-01", sent_count: 125, bounce_count: 10 }] },
+      },
+      analytics: { 10: remaining, 11: remaining },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Client Logo"]]) }),
+      async (watch) => {
+        const pulse = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(pulse.posted, true);
+        assert.equal(smartlead.started.length, 0);
+        assert.equal(
+          smartlead.started.some((row) => row.status === "PAUSED" || row.status === "STOPPED"),
+          false,
+        );
+        assert.equal(smartlead.campaigns.every((row) => row.status === "ACTIVE"), true);
+        assert.match(slack.posted.join("\n"), /8\.0% bounce|high bounce \(8\.0%\)/);
+      },
+    );
+  });
+
+  it("Slacks an autobounce alert without changing campaign status", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({
+          id: 88,
+          name: "Client Displacement",
+          status: "PAUSED",
+          client_id: 9,
+        }),
+      ],
+      clients: [{ id: 9, name: "Client Nine" }],
+      analytics: {
+        88: { sent_count: 195, bounce_count: 16, bounce_rate: 8.2 },
+      },
+      detail: {
+        88: {
+          id: 88,
+          name: "Client Displacement",
+          status: "PAUSED",
+          client_id: 9,
+          auto_paused: true,
+        },
+      },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[9, "Client Nine"]]) }),
+      async (watch, state) => {
+        state.put(88, { status: "ACTIVE", notifiedThresholds: [], seen: true });
+        const result = await watch.run(weekdayAfternoon);
+        assert.equal(result.autobounce, 1);
+        assert.equal(smartlead.started.length, 0);
+        assert.match(slack.posted[0] ?? "", /auto-paused/);
+        assert.equal(smartlead.campaigns[0]?.status, "PAUSED");
+      },
+    );
+  });
+
+  it("leaves ACTIVE lists ACTIVE when campaign bounce is over the warn line", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [campaign({ id: 44, name: "Client Active List", client_id: BCP })],
+      clients: [{ id: BCP, logo: "Client Logo" }],
+      analytics: { 44: { sent_count: 200, bounce_count: 16, bounce_rate: 8 } },
+      detail: { 44: { id: 44, name: "Client Active List", status: "ACTIVE", client_id: BCP } },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({ registry: new Map([[BCP, "Client Logo"]]) }),
+      async (watch, state) => {
+        state.put(44, { status: "ACTIVE", notifiedThresholds: [], seen: true });
+        const result = await watch.run(weekdayAfternoon);
+        assert.equal(result.autobounce, 0);
+        assert.deepEqual(smartlead.started, []);
+        assert.equal(smartlead.campaigns[0]?.status, "ACTIVE");
+      },
     );
   });
 });

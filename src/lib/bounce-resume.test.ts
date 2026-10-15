@@ -111,4 +111,10 @@ describe("bounce-resume selection", () => {
     assert.equal(bounceResumeSkipReason(hold({ id: 99 }), rules({ enabled: false })), "disabled");
     assert.deepEqual(selectBounceHoldsToResume([hold({ id: 99 })], rules({ enabled: false })), []);
   });
+
+  it("never STARTs a STOPPED campaign", () => {
+    assert.equal(bounceResumeSkipReason(hold({ id: 99, status: "STOPPED" }), rules()), "stopped");
+    assert.deepEqual(selectBounceHoldsToResume([hold({ id: 99, status: "STOPPED" })], rules()), []);
+    assert.equal(bounceResumeSkipReason(hold({ id: 99, status: "ACTIVE" }), rules()), "not paused");
+  });
 });

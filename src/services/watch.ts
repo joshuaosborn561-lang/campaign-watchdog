@@ -119,9 +119,9 @@ export class WatchService {
   }
 
   /**
-   * 15-minute watch. Weekday Slack: autobounce pauses, 75/90/100 completion,
-   * and HeyReach runway / pending-dry. No digest or weekend posts. The 2-hour
-   * pulse is a separate cron (`runPulse`).
+   * 15-minute watch. Weekday Slack: autobounce alerts, 75/90/100 completion,
+   * and HeyReach runway / pending-dry. No digest or weekend posts. Never
+   * pauses or stops a campaign. The 2-hour pulse is a separate cron (`runPulse`).
    */
   async run(now = new Date()): Promise<WatchResult> {
     const result: WatchResult = {
@@ -662,6 +662,7 @@ export class WatchService {
       parseLinkedInboxCount(input.parts.detail) ??
       parseLinkedInboxCount(input.parts.settings);
     const bounceRate = bouncePercent(input.volume.sent, input.volume.bounced);
+    // Diagnostic only — used for *under* copy. Never pauses or stops a list.
     const bounceHold =
       Boolean(input.extra?.bounceHold) ||
       (bounceRate != null &&
@@ -798,6 +799,7 @@ export class WatchService {
       fallbackThreshold: this.config.bounceAutoPauseThreshold,
       minSample: this.config.minBounceSample,
     });
+    // Alert only. Watchdog never POSTs PAUSED/STOPPED — even when bounce is over threshold.
     const becamePaused = snapshot.seen && snapshot.status !== "PAUSED" && verdict.paused;
     if (input.allowSlack && !firstSeen && becamePaused && verdict.autobounce) {
       const key = `pause:v1:${input.campaign.id}:${input.day}`;

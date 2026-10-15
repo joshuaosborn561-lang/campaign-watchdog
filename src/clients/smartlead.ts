@@ -3,6 +3,44 @@ import { asRecordArray, asNumber, pickString, unwrap } from "../lib/parse.js";
 
 const BASE_URL = "https://server.smartlead.ai/api/v1/";
 
+/** Watchdog may START a bounce-protection hold. It must never PAUSE or STOP. */
+export const FORBIDDEN_CAMPAIGN_STATUSES = ["PAUSED", "STOPPED"] as const;
+export type ForbiddenCampaignStatus = (typeof FORBIDDEN_CAMPAIGN_STATUSES)[number];
+export type SmartleadCampaignStatusWrite = "START" | ForbiddenCampaignStatus;
+
+export class ForbiddenCampaignStatusError extends Error {
+  readonly campaignId: number;
+  readonly status: string;
+
+  constructor(campaignId: number, status: string) {
+    super(
+      `[watchdog] refused Smartlead status change to ${status} for campaign ${campaignId}`,
+    );
+    this.name = "ForbiddenCampaignStatusError";
+    this.campaignId = campaignId;
+    this.status = status;
+  }
+}
+
+export function isForbiddenCampaignStatus(status: string): boolean {
+  const normalized = String(status ?? "").trim().toUpperCase();
+  return normalized === "PAUSED" || normalized === "STOPPED";
+}
+
+/** Throws and logs when a caller asks to PAUSE or STOP a campaign. */
+export function assertAllowedCampaignStatus(
+  campaignId: number,
+  status: string,
+): "START" {
+  const normalized = String(status ?? "").trim().toUpperCase();
+  if (isForbiddenCampaignStatus(normalized) || normalized !== "START") {
+    const error = new ForbiddenCampaignStatusError(campaignId, normalized || "(empty)");
+    console.error(error.message);
+    throw error;
+  }
+  return "START";
+}
+
 export interface SmartleadCampaign {
   id: number;
   name: string;
@@ -73,11 +111,12 @@ export class SmartleadClient {
 
   updateCampaignStatus(
     campaignId: number,
-    status: "START" | "PAUSED" | "STOPPED",
+    status: SmartleadCampaignStatusWrite,
   ): Promise<unknown> {
+    const allowed = assertAllowedCampaignStatus(campaignId, status);
     return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/status`, {
       method: "POST",
-      body: { status },
+      body: { status: allowed },
     });
   }
 
