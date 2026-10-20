@@ -405,10 +405,7 @@ export function formatClientPulse(input: {
   const totalSent = input.clients.reduce((sum, row) => sum + row.sent, 0);
   const totalBounced = input.clients.reduce((sum, row) => sum + row.bounced, 0);
   const lines: string[] = [];
-  if (input.clients.some((row) => row.under)) {
-    const mentions = formatUnderMentionLine(input.mentionUserIds ?? []);
-    if (mentions) lines.push(mentions);
-  }
+  // No @-mentions in pulses (Josh, 2026-10-20). mentionUserIds is ignored.
   lines.push(`*${formatStamp(input.day, input.hour)} — sent today*`);
   for (const row of input.clients) {
     lines.push(`*${row.clientName}* — ${formatClientLine(row, input.bounceWarn)}`);

@@ -304,10 +304,8 @@ export class WatchService {
       paused,
       pausedToday,
       exclude: pulseExclude,
-      mentionUserIds:
-        underCount > 0
-          ? [this.config.slackCaydenUserId, this.config.slackJoshUserId]
-          : [],
+      // Josh 2026-10-20: "dont tag us anymore" — pulses never @-mention.
+      mentionUserIds: [],
       unpausedBounceHolds: unpaused,
     });
     this.state.setLastPulseSlot(slot);
