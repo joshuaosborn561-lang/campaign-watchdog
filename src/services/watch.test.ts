@@ -358,7 +358,7 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         assert.equal(result.posted, true);
         assert.equal(result.under, 1);
         const text = slack.posted[0] ?? "";
-        assert.equal(text.split("\n")[0], "<@U0BL8JT75KN> <@U0AAX2XFJE7>");
+        assert.doesNotMatch(text, /<@/);
         assert.match(
           text,
           /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\* — pace short of 1,200/,

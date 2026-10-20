@@ -115,10 +115,7 @@ describe("client pulse", () => {
         { clientName: "Vasco Warranty", sent: 80, bounced: 0, under: true },
       ],
     });
-    assert.equal(
-      under.split("\n")[0],
-      `<@${DEFAULT_SLACK_CAYDEN_USER_ID}> <@${DEFAULT_SLACK_JOSH_USER_ID}>`,
-    );
+    assert.doesNotMatch(under, /<@/);
     assert.match(
       under,
       /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\* — pace short of 1,200/,
