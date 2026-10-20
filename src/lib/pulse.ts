@@ -17,10 +17,10 @@ export interface ClientPulse {
   underReason?: string;
 }
 
-/** Cayden in #campaign-watchdog. Override with SLACK_CAYDEN_USER_ID. */
+/** Cayden in #campaign-watchdog. Used only when SLACK_MENTION_UNDER is on. */
 export const DEFAULT_SLACK_CAYDEN_USER_ID = "U0BL8JT75KN";
 
-/** Josh (owner) — Joshua Osborn. Override with SLACK_JOSH_USER_ID. */
+/** Josh (owner) — Joshua Osborn. Used only when SLACK_MENTION_UNDER is on. */
 export const DEFAULT_SLACK_JOSH_USER_ID = "U0AAX2XFJE7";
 
 export interface OffTrackPulseRow {
@@ -112,7 +112,7 @@ export function slackMention(userId: string): string {
   return id ? `<@${id}>` : "";
 }
 
-/** `<@Cayden> <@Josh>` line. Empty if no ids. */
+/** `<@Cayden> <@Josh>` line. Empty if no ids (the default pulse path). */
 export function formatUnderMentionLine(userIds: Iterable<string>): string | null {
   const mentions = [...new Set([...userIds].map(slackMention).filter(Boolean))];
   return mentions.length ? mentions.join(" ") : null;

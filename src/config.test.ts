@@ -20,6 +20,7 @@ describe("loadConfig", () => {
     assert.equal(config.slackJoshUserId, DEFAULT_SLACK_JOSH_USER_ID);
     assert.equal(config.slackCaydenUserId, "U0BL8JT75KN");
     assert.equal(config.slackJoshUserId, "U0AAX2XFJE7");
+    assert.equal(config.slackMentionUnder, false);
     assert.deepEqual(config.completionThresholds, [50, 75, 90, 100]);
     assert.equal(config.messagePerDay, 30);
     assert.equal(config.sendShortfallTimezone, "America/Chicago");
@@ -61,7 +62,7 @@ describe("loadConfig", () => {
     assert.deepEqual(off.bounceResumeExcludeIds, [11, 22]);
   });
 
-  it("reads Slack mention ids from env", () => {
+  it("keeps Slack mention ids but leaves tagging off unless SLACK_MENTION_UNDER is set", () => {
     const config = loadConfig({
       SMARTLEAD_API_KEY: "sl-key",
       SLACK_BOT_TOKEN: "xoxb-test",
@@ -70,6 +71,16 @@ describe("loadConfig", () => {
     } as NodeJS.ProcessEnv);
     assert.equal(config.slackCaydenUserId, "U111");
     assert.equal(config.slackJoshUserId, "U222");
+    assert.equal(config.slackMentionUnder, false);
+
+    const on = loadConfig({
+      SMARTLEAD_API_KEY: "sl-key",
+      SLACK_BOT_TOKEN: "xoxb-test",
+      SLACK_MENTION_UNDER: "1",
+    } as NodeJS.ProcessEnv);
+    assert.equal(on.slackMentionUnder, true);
+    assert.equal(on.slackCaydenUserId, DEFAULT_SLACK_CAYDEN_USER_ID);
+    assert.equal(on.slackJoshUserId, DEFAULT_SLACK_JOSH_USER_ID);
   });
 
   it("merges extra pulse exclude ids and names onto the built-in defaults", () => {

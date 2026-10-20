@@ -89,7 +89,7 @@ describe("client pulse", () => {
     assert.match(some, /Unpaused 3 bounce holds/);
   });
 
-  it("flags *under* and mentions Cayden + Josh only when a client is under", () => {
+  it("flags *under* and mentions Cayden + Josh only when ids are passed and a client is under", () => {
     const mentions = [DEFAULT_SLACK_CAYDEN_USER_ID, DEFAULT_SLACK_JOSH_USER_ID];
     const clean = formatClientPulse({
       day: "2026-09-01",

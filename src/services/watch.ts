@@ -177,7 +177,7 @@ export class WatchService {
 
   /**
    * Weekday 2-hour sent-today pulse. Client summary only — no Off track / low-on-leads
-   * dump. Mentions Cayden + Josh when any client is projected *under*. Before the
+   * dump. Does not @-mention anyone unless SLACK_MENTION_UNDER is on. Before the
    * rollup, STARTs bounce-protection holds unless AUTO_RESUME_BOUNCE_HOLDS is off.
    */
   async runPulse(
@@ -305,7 +305,7 @@ export class WatchService {
       pausedToday,
       exclude: pulseExclude,
       mentionUserIds:
-        underCount > 0
+        underCount > 0 && this.config.slackMentionUnder
           ? [this.config.slackCaydenUserId, this.config.slackJoshUserId]
           : [],
       unpausedBounceHolds: unpaused,

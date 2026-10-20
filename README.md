@@ -8,7 +8,7 @@ Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GS
 
 | Post | When | Copy |
 | --- | --- | --- |
-| 2-hour pulse | `PULSE_CRON` default `5 8,10,12,14,16 * * 1-5` America/Chicago. Grace until the next slot. Before the client rollup, `START`s bounce-protection holds (see Auto-resume). | `*Tue 9/1 10:00am — sent today*` then `*Client* — 400 sent · 0.5% bounce`. If any were unpaused: `Unpaused N bounce holds` (omitted when N is 0). If any client is `*under*`, the post starts with `<@Cayden> <@Josh>` and that line appends a one-phrase reason. |
+| 2-hour pulse | `PULSE_CRON` default `5 8,10,12,14,16 * * 1-5` America/Chicago. Grace until the next slot. Before the client rollup, `START`s bounce-protection holds (see Auto-resume). | `*Tue 9/1 10:00am — sent today*` then `*Client* — 400 sent · 0.5% bounce`. If any were unpaused: `Unpaused N bounce holds` (omitted when N is 0). If any client is `*under*`, that line appends a one-phrase reason. No user @-mentions unless `SLACK_MENTION_UNDER=1`. |
 | Midday | `VOLUME_CRON` default `10 12 * * 1-5` America/Chicago. Projection snaps to 12:00. | `*Midday — Tue 9/1 12:00pm*` then `• *Client* \`#id\` — 200 sent → 600 proj · *under* — too few leads on ACTIVE lists` |
 | Autobounce | Every 15 minutes (`CRON`), weekdays only. First-seen is seeded with no Slack. | `*Client* — *Campaign* \`#id\` auto-paused (8.2% bounce on 195 sends).` |
 | Nearly done / finished | Same 15-minute watch, weekdays only, as soon as 75% / 90% / 100% is crossed. 50% is tracked in state but not Slacked. | `*Client* — *Campaign* is nearly done (75%, 238 left). Refill soon.` / `finished the list.` plus whether the client still has another ACTIVE list with leads. |
@@ -17,7 +17,7 @@ Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GS
 
 Pulse and midday flag `*under*` when projected &lt; 1,080 (more than 10% under the 1,200-send / 40-sender day). Pulse projection snaps to the slot hour (8/10/12/14/16). EOD compares actual sends to 1,200. Each `*under*` line appends one primary cause from live Smartlead signals already on that client (leads, inboxes, high bounce, paused lists, daily cap, or outside send window — otherwise `pace short of 1,200`). High bounce is an alert phrase only — it does not pause lists. No campaign dump. Low-on-leads is EOD-only: each ACTIVE list with remaining / 1,200 under 7 days counts as one; Josh will ask for names.
 
-Pulse does **not** dump Off track / too-few-leads / runway essays. Mentions fire only when at least one pulse line is `*under*` — never on a clean pulse, and never for low-on-leads.
+Pulse does **not** dump Off track / too-few-leads / runway essays. User @-mentions are off by default. Set `SLACK_MENTION_UNDER=1` to restore Cayden + Josh pings when a pulse line is `*under*` — still never on a clean pulse, and never for low-on-leads.
 
 ## Auto-resume bounce holds
 
@@ -56,7 +56,7 @@ See `.env.example`. Minimum:
 - `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (client names + alert dedupe)
 - Optional HeyReach workspace keys: `HEYREACH_SALESGLIDER_API_KEY`, `HEYREACH_TECHEVO_API_KEY`
 
-Optional: `PULSE_CRON` (default `5 8,10,12,14,16 * * 1-5`, **live again**), `VOLUME_CRON`, `EOD_CRON`, `VOLUME_TARGET_SENDS` (default 1200), `VOLUME_ALERT_MAX` (default 1080), `AUTO_RESUME_BOUNCE_HOLDS` (default on), `BOUNCE_RESUME_EXCLUDE_IDS`. Pulse under-mentions use `SLACK_CAYDEN_USER_ID` (default `U0BL8JT75KN`) and `SLACK_JOSH_USER_ID` (default `U0AAX2XFJE7`). Safe to leave unset on Railway unless you need to override.
+Optional: `PULSE_CRON` (default `5 8,10,12,14,16 * * 1-5`, **live again**), `VOLUME_CRON`, `EOD_CRON`, `VOLUME_TARGET_SENDS` (default 1200), `VOLUME_ALERT_MAX` (default 1080), `AUTO_RESUME_BOUNCE_HOLDS` (default on), `BOUNCE_RESUME_EXCLUDE_IDS`. Pulse @-mentions stay off unless `SLACK_MENTION_UNDER=1`; ids are `SLACK_CAYDEN_USER_ID` (default `U0BL8JT75KN`) and `SLACK_JOSH_USER_ID` (default `U0AAX2XFJE7`). Safe to leave unset on Railway.
 
 Mount a volume at `/data` so `STATE_FILE_PATH=/data/watchdog-state.json` survives restarts.
 
