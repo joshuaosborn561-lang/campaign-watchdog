@@ -89,7 +89,7 @@ describe("client pulse", () => {
     assert.match(some, /Unpaused 3 bounce holds/);
   });
 
-  it("flags *under* and mentions Cayden + Josh only when a client is under", () => {
+  it("flags *under* and mentions Cayden + Josh only when ids are passed and a client is under", () => {
     const mentions = [DEFAULT_SLACK_CAYDEN_USER_ID, DEFAULT_SLACK_JOSH_USER_ID];
     const clean = formatClientPulse({
       day: "2026-09-01",
@@ -115,7 +115,10 @@ describe("client pulse", () => {
         { clientName: "Vasco Warranty", sent: 80, bounced: 0, under: true },
       ],
     });
-    assert.doesNotMatch(under, /<@/);
+    assert.equal(
+      under.split("\n")[0],
+      `<@${DEFAULT_SLACK_CAYDEN_USER_ID}> <@${DEFAULT_SLACK_JOSH_USER_ID}>`,
+    );
     assert.match(
       under,
       /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\* — pace short of 1,200/,

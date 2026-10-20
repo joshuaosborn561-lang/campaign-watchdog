@@ -329,7 +329,7 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
     );
   });
 
-  it("mentions Cayden and Josh on the pulse when any client is *under*", async () => {
+  it("does not @ anyone on the pulse when a client is *under*", async () => {
     const slack = fakeSlack();
     await withService(
       fakeSmartlead({
@@ -358,6 +358,7 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         assert.equal(result.posted, true);
         assert.equal(result.under, 1);
         const text = slack.posted[0] ?? "";
+        assert.equal(text.split("\n")[0], "*Tue 9/1 10:00am — sent today*");
         assert.doesNotMatch(text, /<@/);
         assert.match(
           text,
@@ -367,6 +368,46 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         assert.doesNotMatch(text, /too few leads/);
         assert.doesNotMatch(text, /Off track/i);
       },
+    );
+  });
+
+  it("mentions Cayden and Josh on *under* pulses only when SLACK_MENTION_UNDER is on", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+          campaign({ id: 200, name: "Vasco - Signal", client_id: 548609 }),
+        ],
+        clients: [
+          { id: BCP, logo: "Bolder Cyber Partners" },
+          { id: 548609, name: "Vasco Warranty" },
+        ],
+        analyticsByDate: {
+          100: { data: [{ date: "2026-09-01", sent_count: 400, bounce_count: 0 }] },
+          200: { data: [{ date: "2026-09-01", sent_count: 80, bounce_count: 0 }] },
+        },
+      }),
+      slack,
+      fakeSupabase({
+        registry: new Map([
+          [BCP, "Bolder Cyber Partners"],
+          [548609, "Vasco Warranty"],
+        ]),
+      }),
+      async (watch) => {
+        const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(result.posted, true);
+        assert.equal(result.under, 1);
+        const text = slack.posted[0] ?? "";
+        assert.equal(text.split("\n")[0], "<@U0BL8JT75KN> <@U0AAX2XFJE7>");
+        assert.match(
+          text,
+          /\*Vasco Warranty\* — 80 sent · 0\.0% bounce · \*under\* — pace short of 1,200/,
+        );
+      },
+      [],
+      { SLACK_MENTION_UNDER: "1" },
     );
   });
 
@@ -399,6 +440,7 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
           text,
           /\*SalesGlider\* — 80 sent · 0\.0% bounce · \*under\* — too few leads on ACTIVE lists/,
         );
+        assert.doesNotMatch(text, /<@/);
         assert.doesNotMatch(text, /Nurture/);
         assert.doesNotMatch(text, /Off track/i);
       },

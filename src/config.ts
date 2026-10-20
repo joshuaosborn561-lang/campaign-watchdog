@@ -191,6 +191,8 @@ export interface AppConfig {
   slackChannelId: string;
   slackCaydenUserId: string;
   slackJoshUserId: string;
+  /** Opt-in pulse @-mentions. Default off — empty env cannot turn tagging on. */
+  slackMentionUnder: boolean;
   supabaseUrl: string;
   supabaseServiceRoleKey: string;
   messagePerDay: number;
@@ -249,6 +251,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       slackChannelId,
       slackCaydenUserId: optional("SLACK_CAYDEN_USER_ID", DEFAULT_SLACK_CAYDEN_USER_ID),
       slackJoshUserId: optional("SLACK_JOSH_USER_ID", DEFAULT_SLACK_JOSH_USER_ID),
+      slackMentionUnder: optionalBool("SLACK_MENTION_UNDER", false),
       supabaseUrl: optional("SUPABASE_URL"),
       supabaseServiceRoleKey: optional("SUPABASE_SERVICE_ROLE_KEY"),
       messagePerDay: optionalNumber("MESSAGE_PER_DAY", 30),
