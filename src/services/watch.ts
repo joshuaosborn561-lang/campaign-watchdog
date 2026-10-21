@@ -661,13 +661,13 @@ export class WatchService {
       fromAccounts?.attached ??
       parseLinkedInboxCount(input.parts.detail) ??
       parseLinkedInboxCount(input.parts.settings);
-    const bounceRate = bouncePercent(input.volume.sent, input.volume.bounced);
-    // Diagnostic only — used for *under* copy. Never pauses or stops a list.
-    const bounceHold =
-      Boolean(input.extra?.bounceHold) ||
-      (bounceRate != null &&
-        input.volume.sent >= this.config.minBounceSample &&
-        bounceRate + 1e-9 >= this.config.bounceAutoPauseThreshold);
+    // Bounce hold only when a list was actually auto-paused — a high rate alone
+    // is not why volume is short. Diagnostic only; never pauses or stops.
+    const bounceHold = Boolean(input.extra?.bounceHold);
+    const senders = input.parts.accounts
+      .map((row) => accountFromSmartlead(row))
+      .filter((a) => a.id > 0)
+      .map((a) => ({ id: a.id, sentToday: a.dailySent, dailyLimit: a.messagePerDay ?? null }));
     return {
       clientId: input.resolvedClient.clientId,
       clientName: input.resolvedClient.clientName,
@@ -680,6 +680,7 @@ export class WatchService {
       disconnected: fromAccounts?.disconnected ?? null,
       pausedCampaigns: input.extra?.paused ?? 0,
       bounceHold,
+      senders,
     };
   }
 

@@ -44,6 +44,14 @@ export interface VolumeCampaignInput {
   disconnected?: number | null;
   pausedCampaigns?: number;
   bounceHold?: boolean;
+  /** Per-sender today counts, deduped by id across a client's lists. */
+  senders?: SenderLoad[];
+}
+
+export interface SenderLoad {
+  id: number;
+  sentToday: number;
+  dailyLimit: number | null;
 }
 
 export interface ClientVolumeRow {
@@ -149,6 +157,7 @@ interface VolumeGroup {
   pausedCampaigns: number;
   bounceHold: boolean;
   caps: Array<number | null>;
+  senders: Map<number, SenderLoad>;
 }
 
 function addVolumeGroupRow(
@@ -156,7 +165,7 @@ function addVolumeGroupRow(
   row: VolumeCampaignInput,
 ): void {
   const key = clientGroupKey(row);
-  const current = groups.get(key) ?? {
+  const current: VolumeGroup = groups.get(key) ?? {
     clientId: row.clientId ?? null,
     clientName: row.clientName,
     sent: 0,
@@ -168,6 +177,7 @@ function addVolumeGroupRow(
     disconnecteds: [],
     pausedCampaigns: 0,
     bounceHold: false,
+    senders: new Map(),
     caps: [],
   };
   current.sent += Math.max(0, row.sent);
@@ -179,6 +189,7 @@ function addVolumeGroupRow(
   current.disconnecteds.push(row.disconnected);
   current.pausedCampaigns = Math.max(current.pausedCampaigns, row.pausedCampaigns ?? 0);
   current.bounceHold = current.bounceHold || Boolean(row.bounceHold);
+  for (const sender of row.senders ?? []) current.senders.set(sender.id, sender);
   current.caps.push(row.schedule.maxLeadsPerDay);
   groups.set(key, current);
 }
@@ -202,6 +213,42 @@ function underSignalsFromGroup(
     maxLeadsPerDay: rollupDailyCap(group.caps),
     outsideWindow,
     alertMax,
+    ...senderSignals(group.senders),
+  };
+}
+
+export function senderSignals(senders: Map<number, SenderLoad>): {
+  sendersTotal: number | null;
+  sendersAtCap: number | null;
+  senderDailyMax: number | null;
+  capacityLeft: number | null;
+} {
+  const list = [...senders.values()].filter((s) => s.dailyLimit != null && s.dailyLimit > 0);
+  if (!list.length) {
+    return { sendersTotal: null, sendersAtCap: null, senderDailyMax: null, capacityLeft: null };
+  }
+  let atCap = 0;
+  let max = 0;
+  let left = 0;
+  for (const s of list) {
+    const limit = s.dailyLimit as number;
+    max += limit;
+    left += Math.max(0, limit - s.sentToday);
+    if (s.sentToday >= limit) atCap += 1;
+  }
+  return { sendersTotal: list.length, sendersAtCap: atCap, senderDailyMax: max, capacityLeft: left };
+}
+
+/** Not-enough-leads *under* also hands off to Lead Top Up (flag only — never starts lists). */
+function underFields(
+  under: boolean,
+  signals: Parameters<typeof explainUnderVolume>[0],
+  lowLeadCampaigns: number,
+): { underReason?: string; needsTopUp: boolean } {
+  const reason = under ? explainUnderVolume(signals) : null;
+  return {
+    underReason: reason?.text,
+    needsTopUp: lowLeadCampaigns > 0 || reason?.kind === "leads",
   };
 }
 
@@ -304,10 +351,7 @@ export function rollupClientVolume(
       remaining,
       daysLeft,
       under,
-      underReason: under
-        ? explainUnderVolume(underSignalsFromGroup(group, remaining, outsideWindow)).text
-        : undefined,
-      needsTopUp: lowLeadCampaigns > 0,
+      ...underFields(under, underSignalsFromGroup(group, remaining, outsideWindow), lowLeadCampaigns),
       lowLeadCampaigns,
       fraction,
       startMinutes: window.start,
@@ -341,10 +385,11 @@ export function rollupClientEod(
       remaining,
       daysLeft,
       under,
-      underReason: under
-        ? explainUnderVolume(underSignalsFromGroup(group, remaining, false, alertMax)).text
-        : undefined,
-      needsTopUp: lowLeadCampaigns > 0,
+      ...underFields(
+        under,
+        underSignalsFromGroup(group, remaining, false, alertMax),
+        lowLeadCampaigns,
+      ),
       lowLeadCampaigns,
       fraction: 1,
       startMinutes: 0,

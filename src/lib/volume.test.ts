@@ -491,3 +491,17 @@ describe("end-of-day volume", () => {
     assert.equal(resolveVolumeSlot(eodTue, CHICAGO), null);
   });
 });
+
+import { senderSignals } from "./volume.js";
+describe("senderSignals", () => {
+  it("dedupes senders and sums capacity", () => {
+    const m = new Map([
+      [1, { id: 1, sentToday: 10, dailyLimit: 10 }],
+      [2, { id: 2, sentToday: 4, dailyLimit: 10 }],
+      [3, { id: 3, sentToday: 0, dailyLimit: null }],
+    ]);
+    assert.deepEqual(senderSignals(m), {
+      sendersTotal: 2, sendersAtCap: 1, senderDailyMax: 20, capacityLeft: 6,
+    });
+  });
+});

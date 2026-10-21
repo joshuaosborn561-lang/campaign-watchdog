@@ -40,28 +40,68 @@ describe("explainUnderVolume", () => {
         staffable: 2,
         disconnected: 18,
       }),
-      { kind: "inboxes", text: "most campaign inboxes SMTP/IMAP down" },
+      { kind: "inboxes", text: "18 senders disconnected (SMTP/IMAP down)" },
     );
   });
 
-  it("picks high bounce when today's bounce is over the warn line (alert copy only)", () => {
+  it("never blames a high bounce rate alone — only an actual auto-pause", () => {
     assert.deepEqual(
-      explainUnderVolume({
-        sent: 200,
-        remaining: 8000,
-        attached: 40,
-        bounced: 16,
-      }),
-      { kind: "bounce", text: "high bounce (8.0%)" },
+      explainUnderVolume({ sent: 200, remaining: 8000, attached: 40, bounced: 16 }),
+      { kind: "pace", text: "pace short of 1,200" },
     );
     assert.deepEqual(
+      explainUnderVolume({ sent: 200, remaining: 8000, attached: 40, bounceHold: true }),
+      { kind: "bounce", text: "bounce hold: a list was auto-paused for high bounce" },
+    );
+  });
+
+  it("sender-capped when >=90% of senders hit their limit, even with high bounce", () => {
+    // 10/21-style: 67 senders, 66 at cap, 684/day max, 2.9% bounce.
+    assert.deepEqual(
       explainUnderVolume({
-        sent: 200,
-        remaining: 8000,
-        attached: 40,
-        bounceHold: true,
+        sent: 683, bounced: 20, remaining: 849, attached: 67,
+        sendersTotal: 67, sendersAtCap: 66, senderDailyMax: 684, capacityLeft: 1,
       }),
-      { kind: "bounce", text: "high bounce rate" },
+      { kind: "senders", text: "sender-capped: 66 of 67 senders hit their daily limit (684/day max)" },
+    );
+    // All at cap, 18% bounce, under 40 seats → still the sender cap.
+    assert.equal(
+      explainUnderVolume({
+        sent: 555, bounced: 100, remaining: 4428, attached: 27,
+        sendersTotal: 27, sendersAtCap: 27, senderDailyMax: 555, capacityLeft: 0,
+      }).text,
+      "sender-capped: all 27 senders hit their daily limit (555/day max)",
+    );
+  });
+
+  it("not enough leads when new leads left < remaining sender capacity", () => {
+    // 75 senders, 15 at cap, ~1,074 capacity left, 293 new leads, high bounce.
+    assert.deepEqual(
+      explainUnderVolume({
+        sent: 693, bounced: 60, remaining: 293, attached: 75,
+        sendersTotal: 75, sendersAtCap: 15, senderDailyMax: 1767, capacityLeft: 1074,
+      }),
+      {
+        kind: "leads",
+        text: "not enough leads: 293 new leads left vs 1,074 sends of capacity left",
+      },
+    );
+    assert.equal(
+      explainUnderVolume({
+        sent: 0, remaining: 0, attached: 50,
+        sendersTotal: 50, sendersAtCap: 0, senderDailyMax: 1000, capacityLeft: 1000,
+      }).kind,
+      "leads",
+    );
+  });
+
+  it("flags disconnected senders after paused checks", () => {
+    assert.equal(
+      explainUnderVolume({
+        sent: 400, remaining: 9000, attached: 45, staffable: 43,
+        sendersTotal: 45, sendersAtCap: 10, senderDailyMax: 900, capacityLeft: 500,
+      }).text,
+      "2 senders disconnected (SMTP/IMAP down)",
     );
   });
 
