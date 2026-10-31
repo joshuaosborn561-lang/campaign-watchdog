@@ -1,4 +1,16 @@
 import { DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS } from "./lib/bounce-resume.js";
+import { parseCheckMode, type CheckMode } from "./lib/check-mode.js";
+import {
+  DEFAULT_LEADS_SKIP_CLIENT_IDS,
+  DEFAULT_LEADS_SKIP_IDS,
+  DEFAULT_LEADS_SKIP_NAME_PATTERNS,
+} from "./lib/leads-check.js";
+import { DEFAULT_DROUGHT_UNCOVERED_CLIENT_IDS, parseSlugMap } from "./lib/meeting-drought.js";
+import {
+  DEFAULT_PAUSED_SWEEP_EXCLUDE_CLIENT_IDS,
+  DEFAULT_PAUSED_SWEEP_EXCLUDE_IDS,
+  DEFAULT_PAUSED_SWEEP_HOLD_IDS,
+} from "./lib/paused-sweep.js";
 import {
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_IDS,
   DEFAULT_PULSE_EXCLUDE_CAMPAIGN_NAMES,
@@ -228,6 +240,30 @@ export interface AppConfig {
   volumeAlertMax: number;
   eodCron: string;
   eodHour: number;
+  checksStateFilePath: string;
+  /** (a) Paused-campaign sweep. Default dry-run: lists what it would START, starts nothing. */
+  pausedSweepMode: CheckMode;
+  pausedSweepCron: string;
+  pausedSweepHoldIds: number[];
+  pausedSweepExcludeIds: number[];
+  pausedSweepExcludeClientIds: number[];
+  /** (b) Leads + double-signature check on live campaigns. Read-only. */
+  leadsCheckMode: CheckMode;
+  leadsCheckCron: string;
+  leadsLowDays: number;
+  leadsRemindHours: number;
+  leadsSkipIds: number[];
+  leadsSkipClientIds: number[];
+  leadsSkipNames: string[];
+  sigLookbackDays: number;
+  /** (c) Client meeting drought. Read-only. */
+  droughtMode: CheckMode;
+  droughtCron: string;
+  droughtWindowDays: number;
+  droughtMinMeetings: number;
+  droughtRepeatDays: number;
+  droughtClientSlugs: Record<number, string>;
+  droughtUncoveredClientIds: number[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -297,6 +333,36 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       volumeAlertMax: optionalNumber("VOLUME_ALERT_MAX", VOLUME_ALERT_MAX),
       eodCron: optional("EOD_CRON", "30 17 * * 1-5"),
       eodHour: optionalNumber("EOD_HOUR", EOD_HOUR),
+      checksStateFilePath: optional("CHECKS_STATE_FILE_PATH", "/data/watchdog-checks-state.json"),
+      pausedSweepMode: parseCheckMode(process.env.PAUSED_SWEEP_MODE, "dry-run"),
+      pausedSweepCron: optional("PAUSED_SWEEP_CRON", "5 9,11,13,15,17 * * 1-5"),
+      pausedSweepHoldIds: csvNumbers("PAUSED_SWEEP_HOLD_IDS", DEFAULT_PAUSED_SWEEP_HOLD_IDS),
+      pausedSweepExcludeIds: csvNumbersMerge(
+        "PAUSED_SWEEP_EXCLUDE_IDS",
+        DEFAULT_PAUSED_SWEEP_EXCLUDE_IDS,
+      ),
+      pausedSweepExcludeClientIds: csvNumbersMerge(
+        "PAUSED_SWEEP_EXCLUDE_CLIENT_IDS",
+        DEFAULT_PAUSED_SWEEP_EXCLUDE_CLIENT_IDS,
+      ),
+      leadsCheckMode: parseCheckMode(process.env.LEADS_CHECK_MODE, "dry-run"),
+      leadsCheckCron: optional("LEADS_CHECK_CRON", "20 9,16 * * 1-5"),
+      leadsLowDays: optionalNumber("LEADS_LOW_DAYS", 2),
+      leadsRemindHours: optionalNumber("LEADS_REMIND_HOURS", 24),
+      leadsSkipIds: csvNumbersMerge("LEADS_SKIP_IDS", DEFAULT_LEADS_SKIP_IDS),
+      leadsSkipClientIds: csvNumbersMerge("LEADS_SKIP_CLIENT_IDS", DEFAULT_LEADS_SKIP_CLIENT_IDS),
+      leadsSkipNames: csvOrNewlineStrings("LEADS_SKIP_NAMES", DEFAULT_LEADS_SKIP_NAME_PATTERNS),
+      sigLookbackDays: optionalNumber("SIG_LOOKBACK_DAYS", 3),
+      droughtMode: parseCheckMode(process.env.MEETING_DROUGHT_MODE, "dry-run"),
+      droughtCron: optional("MEETING_DROUGHT_CRON", "0 8 * * 1-5"),
+      droughtWindowDays: optionalNumber("MEETING_DROUGHT_WINDOW_DAYS", 7),
+      droughtMinMeetings: optionalNumber("MEETING_MIN_PER_WINDOW", 1),
+      droughtRepeatDays: optionalNumber("MEETING_DROUGHT_REPEAT_DAYS", 7),
+      droughtClientSlugs: parseSlugMap(process.env.MEETING_CLIENT_SLUGS),
+      droughtUncoveredClientIds: csvNumbers(
+        "MEETING_UNCOVERED_CLIENT_IDS",
+        DEFAULT_DROUGHT_UNCOVERED_CLIENT_IDS,
+      ),
     };
   } finally {
     process.env = previous;

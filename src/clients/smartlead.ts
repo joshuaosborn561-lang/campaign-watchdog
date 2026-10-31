@@ -99,6 +99,28 @@ export class SmartleadClient {
     return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/statistics`);
   }
 
+  /** Paged sent-email statistics. `total_stats` is the count; `data[].email_message` is the sent body. */
+  getCampaignStatisticsPage(
+    campaignId: number,
+    query: {
+      limit: number;
+      offset?: number;
+      sequenceNumber?: number;
+      sentStartDate?: string;
+      sentEndDate?: string;
+    },
+  ): Promise<unknown> {
+    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/statistics`, {
+      query: {
+        offset: query.offset ?? 0,
+        limit: query.limit,
+        email_sequence_number: query.sequenceNumber,
+        sent_time_start_date: query.sentStartDate,
+        sent_time_end_date: query.sentEndDate,
+      },
+    });
+  }
+
   getCampaignAnalyticsByDate(
     campaignId: number,
     startDate: string,

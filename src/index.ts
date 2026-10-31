@@ -4,7 +4,9 @@ import { loadConfig } from "./config.js";
 import { SlackClient } from "./clients/slack.js";
 import { SmartleadClient } from "./clients/smartlead.js";
 import { SupabaseStore } from "./clients/supabase.js";
+import { ChecksService } from "./services/checks.js";
 import { WatchService } from "./services/watch.js";
+import { ChecksStore } from "./state/checks-store.js";
 import { StateStore } from "./state/store.js";
 
 async function main(): Promise<void> {
@@ -29,6 +31,41 @@ async function main(): Promise<void> {
 
   const smartlead = new SmartleadClient(config.smartleadApiKey);
   const watch = new WatchService(config, smartlead, slack, state, supabase);
+
+  const checksStore = new ChecksStore(config.checksStateFilePath);
+  await checksStore.load();
+  const checks = new ChecksService(config, smartlead, slack, supabase, checksStore);
+  /** One run per check at a time; the checks are independent of the 15-minute watch. */
+  const checkBusy = new Set<string>();
+  const runCheck = async (name: string, fn: () => Promise<unknown>): Promise<unknown> => {
+    if (checkBusy.has(name)) {
+      console.log(`[watchdog] skip ${name}: already running`);
+      return { skipped: "already running" };
+    }
+    checkBusy.add(name);
+    try {
+      await checksStore.load();
+      const report = await fn();
+      await persistTokens();
+      return report;
+    } catch (error) {
+      console.error(`[watchdog] ${name} failed`, error);
+      return { error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      checkBusy.delete(name);
+    }
+  };
+  const summarize = (report: unknown): string => {
+    const r = report as Record<string, unknown>;
+    if (!r || typeof r !== "object") return String(report);
+    if (r.check === "paused-sweep") {
+      return `mode=${r.mode} paused=${r.pausedTotal} client=${r.clientPaused} wouldStart=${(r.wouldStart as unknown[])?.length} started=${(r.started as unknown[])?.length} errors=${(r.errors as unknown[])?.length}`;
+    }
+    if (r.check === "leads-and-signatures") {
+      return `mode=${r.mode} lanes=${r.lanesChecked} flagged=${(r.flagged as unknown[])?.length} alerted=${r.alertedLanes} doubles=${(r.doubleSignatures as unknown[])?.length} newDoubles=${r.newDoubleSignatures} errors=${(r.errors as unknown[])?.length}`;
+    }
+    return `mode=${r.mode} clients=${r.clientsChecked} alerted=${(r.alerted as unknown[])?.length} errors=${(r.errors as unknown[])?.length}`;
+  };
 
   let running = false;
   type ScheduledJob = { kind: "pulse" | "midday" | "eod"; reason: string; firedAt: Date };
@@ -177,6 +214,19 @@ async function main(): Promise<void> {
     res.json({ ok: true });
   });
 
+  /** `?dry=1` forces read-only / log-only whatever the configured mode is. */
+  const checkRoute =
+    (name: string, fn: (opts: { forceDryRun: boolean; ignoreSchedule: boolean }) => Promise<unknown>) =>
+    async (req: express.Request, res: express.Response) => {
+      if (!authorize(req, res)) return;
+      const dry = req.query.dry === "1" || req.query.dry === "true";
+      const report = await runCheck(name, () => fn({ forceDryRun: dry, ignoreSchedule: dry }));
+      res.json({ ok: true, report });
+    };
+  app.post("/checks/paused-sweep", checkRoute("paused-sweep", (o) => checks.runPausedSweep(o)));
+  app.post("/checks/leads", checkRoute("leads", (o) => checks.runLeadsCheck(o)));
+  app.post("/checks/meeting-drought", checkRoute("meeting-drought", (o) => checks.runMeetingDrought(o)));
+
   app.listen(config.port, config.host, () => {
     console.log(`[watchdog] listening on ${config.host}:${config.port}`);
   });
@@ -206,6 +256,33 @@ async function main(): Promise<void> {
     config.eodCron,
     () => {
       void runEod("eod", new Date());
+    },
+    { timezone: config.sendShortfallTimezone },
+  );
+  cron.schedule(
+    config.pausedSweepCron,
+    () => {
+      void runCheck("paused-sweep", () => checks.runPausedSweep()).then((report) =>
+        console.log(`[watchdog] paused-sweep ${summarize(report)}`),
+      );
+    },
+    { timezone: config.sendShortfallTimezone },
+  );
+  cron.schedule(
+    config.leadsCheckCron,
+    () => {
+      void runCheck("leads", () => checks.runLeadsCheck()).then((report) =>
+        console.log(`[watchdog] leads-check ${summarize(report)}`),
+      );
+    },
+    { timezone: config.sendShortfallTimezone },
+  );
+  cron.schedule(
+    config.droughtCron,
+    () => {
+      void runCheck("meeting-drought", () => checks.runMeetingDrought()).then((report) =>
+        console.log(`[watchdog] meeting-drought ${summarize(report)}`),
+      );
     },
     { timezone: config.sendShortfallTimezone },
   );
