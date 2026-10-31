@@ -70,6 +70,32 @@ export class SupabaseStore {
     }
   }
 
+  /**
+   * Booking-page log (`public.bookings` in campaignintelligence: confirmed, not cancelled;
+   * covers Calendly, SavvyCal, HubSpot, MS Bookings, TidyCal and Allo cold-call bookings).
+   * Newest first. Read-only.
+   */
+  async fetchBookings(
+    sinceIso: string,
+  ): Promise<Array<{ client_slug: string; created_at: string; lead_email: string | null }>> {
+    const out: Array<{ client_slug: string; created_at: string; lead_email: string | null }> = [];
+    const pageSize = 1000;
+    for (let page = 0; page < 20; page++) {
+      const rows = await this.select<{
+        client_slug: string;
+        created_at: string;
+        lead_email: string | null;
+      }>(
+        "bookings",
+        "client_slug,created_at,lead_email",
+        `created_at=gte.${encodeURIComponent(sinceIso)}&order=created_at.desc&limit=${pageSize}&offset=${page * pageSize}`,
+      );
+      out.push(...rows);
+      if (rows.length < pageSize) break;
+    }
+    return out;
+  }
+
   async hasAlert(key: string): Promise<boolean> {
     const rows = await this.select<{ alert_key: string }>(
       "campaign_watchdog_alerts",

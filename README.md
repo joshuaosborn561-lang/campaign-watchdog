@@ -30,6 +30,24 @@ On each weekday pulse (same `PULSE_CRON`, still Mon–Fri only), before the sent
 
 Kill switch: `AUTO_RESUME_BOUNCE_HOLDS` (default `true`). Weekend pulses still no-op.
 
+## Scheduled checks (moved from Campaign Watchdog bot routines)
+
+Three deterministic checks run inside this app so the bot routines don't have to. All post **exceptions only** to the same Slack channel (`SLACK_CHANNEL_ID`, `#campaign-watchdog`), never @-mention anyone, and stay silent when there is nothing to say. Live runs only happen Mon–Fri 6am–8pm CT. State lives in `CHECKS_STATE_FILE_PATH` (default `/data/watchdog-checks-state.json`, separate from the 15-minute watch's file).
+
+Each check has a mode flag: `off`, `dry-run` (read-only, result goes to logs/HTTP only, no Slack, no state), or `live`. **All three default to `dry-run`.** Anything unrecognised also means `dry-run`.
+
+| Check | Flag | Cron (America/Chicago) | What it does |
+| --- | --- | --- | --- |
+| Paused sweep | `PAUSED_SWEEP_MODE` | `PAUSED_SWEEP_CRON` = `5 9,11,13,15,17 * * 1-5` | Josh's rule: every campaign that is `PAUSED` (including Smartlead bounce auto-pauses) gets `START`ed. Only the exact status `PAUSED` is ever startable. **Never a `STOPPED` campaign**: status is gated on the list read and re-read from Smartlead immediately before the write. Skips campaigns with no client, shells, the five Goliath campaigns (held on purpose), Gabe's call campaigns and other holdouts, the retired Vasco client, and anything with no linked senders or no leads left (those are reported once, not every run). Slack: one line per restart (with the restart count, e.g. Peterson C2 that keeps auto-pausing). The write is `START` only; the Smartlead client still refuses `PAUSED` / `STOPPED`. Runs on odd hours so it never collides with the even-hour pulse. |
+| Leads + double signatures | `LEADS_CHECK_MODE` | `LEADS_CHECK_CRON` = `20 9,16 * * 1-5` | For every ACTIVE client campaign: not-started leads, and first-touch (sequence 1) sends/day over the last 3 weekdays, giving days of leads left. A lane is *dry* at 0 new leads and *low* under `LEADS_LOW_DAYS` (2). Also samples the last 4 sent emails per live campaign (last `SIG_LOOKBACK_DAYS`, default 3) for a double signature (copy sign-off followed by the mailbox signature). Slack only for lanes that newly went dry/low (or one reminder per `LEADS_REMIND_HOURS`, default 24, while still flagged) and campaigns with a newly detected double signature; recovered lanes reset silently. Live runs also write `refill-handoff-<stamp>.json` next to the state file, grouped per client, for Topup. |
+| Client meeting drought | `MEETING_DROUGHT_MODE` | `MEETING_DROUGHT_CRON` = `0 8 * * 1-5` | A client with fewer than `MEETING_MIN_PER_WINDOW` (1) meetings booked in the trailing `MEETING_DROUGHT_WINDOW_DAYS` (7) is flagged (target 1–2/week). Source: the campaignintelligence booking-page log (`public.bookings`: Calendly, SavvyCal, HubSpot, MS Bookings, TidyCal, Allo), read through `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`. Active client = Smartlead client with at least one ACTIVE campaign. Alerts when a client first crosses, then every `MEETING_DROUGHT_REPEAT_DAYS` (7) while it stays dry. Clients with no booking source (Roofs by Peterson, Insight) are listed once as "can't check". |
+
+Other knobs: `PAUSED_SWEEP_HOLD_IDS` (replaces the Goliath five), `PAUSED_SWEEP_EXCLUDE_IDS` and `PAUSED_SWEEP_EXCLUDE_CLIENT_IDS` (extend the defaults), `LEADS_SKIP_IDS` / `LEADS_SKIP_CLIENT_IDS` / `LEADS_SKIP_NAMES` (extend the defaults; BCP Logistics IT is skipped by name), `MEETING_CLIENT_SLUGS` (`clientId:slug,...`), `MEETING_UNCOVERED_CLIENT_IDS`.
+
+Manual runs: `POST /checks/paused-sweep`, `POST /checks/leads`, `POST /checks/meeting-drought` (same `X-Run-Token`). Add `?dry=1` to force a read-only run that ignores the schedule window and returns the JSON report. For a local dry run against live data: `railway run -- npx tsx scripts/checks-dry-run.ts [sweep|leads|drought|all]` (never posts to Slack, never writes status or state).
+
+The 2-hour pulse's own `AUTO_RESUME_BOUNCE_HOLDS` (bounce-protection holds only) is unchanged. The paused sweep is the broader rule and runs on the odd hours between pulses.
+
 ## What no longer posts
 
 - Huge **Off track** campaign lists on the 2-hour pulse
