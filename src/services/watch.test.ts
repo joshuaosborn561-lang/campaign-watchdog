@@ -7,6 +7,7 @@ import { loadConfig } from "../config.js";
 import type { SmartleadCampaign, SmartleadClientRecord } from "../clients/smartlead.js";
 import type { CampaignNameRow } from "../clients/supabase.js";
 import { resolveClientName } from "./watch.js";
+import type { SwapQuietDecision } from "../lib/swap-quiet.js";
 import { WatchService } from "./watch.js";
 import { StateStore } from "../state/store.js";
 
@@ -151,6 +152,7 @@ async function withService(
   run: (watch: WatchService, state: StateStore) => Promise<void>,
   heyreach: ReturnType<typeof fakeHeyReach>[] = [],
   env: Record<string, string> = {},
+  quiet?: { current(now?: Date): Promise<SwapQuietDecision> },
 ): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "watchdog-"));
   const state = new StateStore(path.join(dir, "state.json"));
@@ -167,6 +169,7 @@ async function withService(
     state,
     supabase as never,
     heyreach as never,
+    quiet,
   );
   try {
     await run(watch, state);
@@ -316,6 +319,7 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         assert.match(text, /Tue 9\/1 10:00am — sent today/);
         assert.match(text, /\*Bolder Cyber Partners\* — 400 sent/);
         assert.match(text, /\*Vasco Warranty\* — 200 sent/);
+        assert.match(text, /Total 600 sent/);
         assert.match(text, /Paused: 1 \(new pauses still alert via 15m watch\)/);
         assert.doesNotMatch(text, /Off track/i);
         assert.doesNotMatch(text, /too few leads/);
@@ -916,8 +920,10 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         assert.ok(state.snapshot(50).notifiedThresholds.includes(75));
         assert.ok(state.snapshot(50).notifiedThresholds.includes(90));
 
-        const mon = await watch.run(new Date("2026-09-07T16:10:00.000Z"));
+        // 1:30pm CT, after the Monday swap window, so this still checks catch-up.
+        const mon = await watch.run(new Date("2026-09-07T18:30:00.000Z"));
         assert.equal(mon.completion, 0);
+        assert.equal(mon.scanned, 1);
         assert.equal(slack.posted.length, 0);
       },
     );
@@ -1461,5 +1467,146 @@ describe("WatchService HeyReach runway", () => {
       },
       [heyreach],
     );
+  });
+});
+
+const monday1005 = new Date("2026-11-09T16:05:00.000Z");
+const monday1020 = new Date("2026-11-09T16:20:00.000Z");
+const monday1215 = new Date("2026-11-09T18:15:00.000Z");
+const monday1230 = new Date("2026-11-09T18:30:00.000Z");
+
+function sendsFixture(day: string) {
+  return fakeSmartlead({
+    campaigns: [
+      campaign({ id: 100, name: "BCP Healthcare Under-1k (No Team)", client_id: BCP }),
+      campaign({ id: 200, name: "Vasco - Signal", client_id: 548609 }),
+    ],
+    clients: [
+      { id: BCP, logo: "Bolder Cyber Partners" },
+      { id: 548609, name: "Vasco Warranty" },
+    ],
+    analyticsByDate: {
+      100: { data: [{ date: day, sent_count: 400, bounce_count: 2 }] },
+      200: { data: [{ date: day, sent_count: 200, bounce_count: 0 }] },
+    },
+    analytics: {
+      100: { campaign_lead_stats: { total: 80, notStarted: 40, inprogress: 0 } },
+      200: { campaign_lead_stats: { total: 80, notStarted: 40, inprogress: 0 } },
+    },
+  });
+}
+
+describe("WatchService Smartlead quiet period", () => {
+  it("skips Smartlead on Monday morning and posts the deferred 10am pulse once the window ends", async () => {
+    const slack = fakeSlack();
+    const smartlead = sendsFixture("2026-11-09");
+    let lists = 0;
+    const listCampaigns = smartlead.listCampaigns;
+    smartlead.listCampaigns = async () => {
+      lists += 1;
+      return listCampaigns();
+    };
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({
+        registry: new Map([
+          [BCP, "Bolder Cyber Partners"],
+          [548609, "Vasco Warranty"],
+        ]),
+      }),
+      async (watch, state) => {
+        const deferred = await watch.runPulse(monday1005);
+        assert.equal(deferred.posted, false);
+        assert.equal(deferred.deferred, true);
+        assert.equal(lists, 0);
+        assert.equal(slack.posted.length, 0);
+        assert.equal(state.deferredJobs()[0]?.slot, "2026-11-09T10");
+        assert.equal(state.lastPulseSlot(), undefined);
+
+        const skipped = await watch.run(monday1020);
+        assert.equal(skipped.scanned, 0);
+        assert.equal(lists, 0);
+        assert.equal(slack.posted.length, 0);
+
+        await watch.run(monday1215);
+        assert.equal(slack.posted.length, 1);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /Mon 11\/9 10:00am — sent today/);
+        assert.match(text, /\*Bolder Cyber Partners\* — 400 sent/);
+        assert.match(text, /\*Vasco Warranty\* — 200 sent/);
+        assert.match(text, /Total 600 sent/);
+        assert.equal(state.deferredJobs().length, 0);
+        assert.equal(state.lastPulseSlot(), "2026-11-09T10");
+
+        await watch.run(monday1230);
+        assert.equal(slack.posted.length, 1);
+      },
+    );
+  });
+
+  it("defers a pulse while the swap signal is in progress and posts it when the signal clears", async () => {
+    const slack = fakeSlack();
+    const smartlead = sendsFixture("2026-09-01");
+    let lists = 0;
+    const listCampaigns = smartlead.listCampaigns;
+    smartlead.listCampaigns = async () => {
+      lists += 1;
+      return listCampaigns();
+    };
+    let quiet = true;
+    const gate = {
+      async current(): Promise<SwapQuietDecision> {
+        return {
+          quiet,
+          reason: quiet ? "swap in progress via http" : "swap finished via http",
+          source: "http",
+          startedAt: "2026-09-01T14:00:00.000Z",
+          finishedAt: quiet ? null : "2026-09-01T15:10:00.000Z",
+        };
+      },
+    };
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({
+        registry: new Map([
+          [BCP, "Bolder Cyber Partners"],
+          [548609, "Vasco Warranty"],
+        ]),
+      }),
+      async (watch) => {
+        const deferred = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        assert.equal(deferred.deferred, true);
+        assert.equal(lists, 0);
+
+        quiet = false;
+        await watch.run(new Date("2026-09-01T15:20:00.000Z"));
+        assert.equal(slack.posted.length, 1);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /Tue 9\/1 10:00am — sent today/);
+        assert.match(text, /\*Bolder Cyber Partners\* — 400 sent/);
+        assert.match(text, /\*Vasco Warranty\* — 200 sent/);
+        assert.match(text, /Total 600 sent/);
+        assert.ok(lists > 0);
+      },
+      [],
+      {},
+      gate,
+    );
+  });
+
+  it("skips the statistics read when analytics already has lead stats", async () => {
+    const slack = fakeSlack();
+    const smartlead = sendsFixture("2026-09-01");
+    let statistics = 0;
+    smartlead.getCampaignStatistics = async () => {
+      statistics += 1;
+      return null;
+    };
+    await withService(smartlead, slack, fakeSupabase(), async (watch) => {
+      await watch.run(weekdayAfternoon);
+      assert.equal(statistics, 0);
+    });
   });
 });

@@ -3,10 +3,23 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly body: unknown,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** Retry-After is either delta-seconds or an HTTP date. */
+export function parseRetryAfter(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  if (!trimmed) return undefined;
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.ceil(seconds * 1000));
+  const date = Date.parse(trimmed);
+  if (Number.isFinite(date)) return Math.max(0, date - now);
+  return undefined;
 }
 
 export interface RequestOptions {
@@ -77,9 +90,11 @@ export async function apiRequest<T>(
         }
       }
 
+      const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
       if (response.status === 429 || response.status >= 500) {
         if (attempt < retries) {
-          await sleep(Math.min(30_000, 500 * 2 ** attempt));
+          const backoff = Math.min(30_000, 500 * 2 ** attempt);
+          await sleep(Math.max(backoff, response.status === 429 ? (retryAfter ?? 0) : 0));
           continue;
         }
       }
@@ -94,7 +109,7 @@ export async function apiRequest<T>(
                   (parsed as { error?: unknown }).error,
               )
             : `HTTP ${response.status}`;
-        throw new ApiError(message, response.status, parsed);
+        throw new ApiError(message, response.status, parsed, retryAfter);
       }
 
       return parsed as T;

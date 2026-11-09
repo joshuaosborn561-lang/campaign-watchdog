@@ -18,6 +18,7 @@ import {
   DEFAULT_SLACK_CAYDEN_USER_ID,
   DEFAULT_SLACK_JOSH_USER_ID,
 } from "./lib/pulse.js";
+import { parseClockMinutes, parseSwapQuietSource, type SwapQuietSettings } from "./lib/swap-quiet.js";
 import {
   DEFAULT_VOLUME_WEEKDAYS,
   EOD_HOUR,
@@ -264,6 +265,15 @@ export interface AppConfig {
   droughtRepeatDays: number;
   droughtClientSlugs: Record<number, string>;
   droughtUncoveredClientIds: number[];
+  /**
+   * Watchdog's share of the account-wide 200 req/min Smartlead cap.
+   * The wizard limiter targets ~150, so this stays well under the remainder.
+   */
+  smartleadMaxPerMinute: number;
+  smartleadMaxConcurrency: number;
+  smartleadMinGapMs: number;
+  /** Wizard weekly POD swap. Live signal wins; Monday morning is the fallback. */
+  swapQuiet: SwapQuietSettings;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -363,6 +373,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         "MEETING_UNCOVERED_CLIENT_IDS",
         DEFAULT_DROUGHT_UNCOVERED_CLIENT_IDS,
       ),
+      smartleadMaxPerMinute: optionalNumber("SMARTLEAD_MAX_PER_MINUTE", 30),
+      smartleadMaxConcurrency: Math.max(1, optionalNumber("SMARTLEAD_MAX_CONCURRENCY", 2)),
+      smartleadMinGapMs: optionalNumber("SMARTLEAD_MIN_GAP_MS", 200),
+      swapQuiet: {
+        source: parseSwapQuietSource(process.env.SWAP_QUIET_SOURCE),
+        signalUrl: optional("SWAP_SIGNAL_URL"),
+        signalToken: optional("SWAP_SIGNAL_TOKEN"),
+        signalTable: optional("SWAP_SIGNAL_TABLE"),
+        signalSchema: optional("SWAP_SIGNAL_SCHEMA", "public"),
+        signalRowId: optional("SWAP_SIGNAL_ROW_ID"),
+        signalTimeoutMs: optionalNumber("SWAP_SIGNAL_TIMEOUT_MS", 5_000),
+        signalMaxAgeMinutes: optionalNumber("SWAP_SIGNAL_MAX_AGE_MINUTES", 240),
+        weekdays: csvNumbers("SWAP_QUIET_WEEKDAYS", [1]),
+        startMinutes: parseClockMinutes(process.env.SWAP_QUIET_START, "SWAP_QUIET_START", 6 * 60),
+        endMinutes: parseClockMinutes(process.env.SWAP_QUIET_END, "SWAP_QUIET_END", 12 * 60),
+        timeZone: optional("SEND_SHORTFALL_TIMEZONE", "America/Chicago"),
+      },
     };
   } finally {
     process.env = previous;

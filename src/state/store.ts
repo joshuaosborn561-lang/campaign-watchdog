@@ -20,6 +20,13 @@ export interface HeyReachSnapshot {
   notifiedPendingDry?: boolean;
 }
 
+/** A Smartlead post that fired during a POD swap and still needs to run. */
+export interface DeferredSmartleadJob {
+  kind: "pulse" | "midday" | "eod";
+  slot: string;
+  firedAt: string;
+}
+
 export interface WatchdogState {
   campaigns: Record<string, CampaignSnapshot>;
   heyreachCampaigns?: Record<string, HeyReachSnapshot>;
@@ -27,6 +34,8 @@ export interface WatchdogState {
   lastPulseSlot?: string;
   lastVolumeDay?: string;
   lastEodDay?: string;
+  /** Pulse / midday / EOD held while the wizard POD swap owns Smartlead. */
+  deferredJobs?: DeferredSmartleadJob[];
   slack?: {
     access_token?: string;
     refresh_token?: string;
@@ -51,6 +60,7 @@ export class StateStore {
         lastPulseSlot: parsed.lastPulseSlot,
         lastVolumeDay: parsed.lastVolumeDay,
         lastEodDay: parsed.lastEodDay,
+        deferredJobs: Array.isArray(parsed.deferredJobs) ? parsed.deferredJobs.map((job) => ({ ...job })) : [],
         slack: parsed.slack,
       };
     } catch {
@@ -137,5 +147,23 @@ export class StateStore {
 
   setLastEodDay(day: string): void {
     this.state.lastEodDay = day;
+  }
+
+  deferredJobs(): DeferredSmartleadJob[] {
+    return [...(this.state.deferredJobs ?? [])].sort((a, b) => a.firedAt.localeCompare(b.firedAt));
+  }
+
+  /** Keep the earliest fire for a slot. A second cron tick must not move it. */
+  deferJob(job: DeferredSmartleadJob): void {
+    const jobs = this.state.deferredJobs ?? [];
+    if (jobs.some((row) => row.kind === job.kind && row.slot === job.slot)) return;
+    const next = [...jobs, job].sort((a, b) => a.firedAt.localeCompare(b.firedAt)).slice(-12);
+    this.state.deferredJobs = next;
+  }
+
+  removeDeferredJob(kind: DeferredSmartleadJob["kind"], slot: string): void {
+    this.state.deferredJobs = (this.state.deferredJobs ?? []).filter(
+      (row) => !(row.kind === kind && row.slot === slot),
+    );
   }
 }

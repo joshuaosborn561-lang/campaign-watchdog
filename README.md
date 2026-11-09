@@ -64,6 +64,33 @@ The 2-hour pulse's own `AUTO_RESUME_BOUNCE_HOLDS` (bounce-protection holds only)
 
 Client names come from Smartlead `client_id` first (`/client/` + `_meta.client_registry`). Sent totals are that campaign's analytics-by-date for the Chicago day — never lifetime.
 
+## Smartlead quiet time (weekly POD swap)
+
+The Smartlead admin API allows 200 requests per minute for the whole account. The deliverability wizard already aims at about 150 of those. Watchdog used to fire a 15-minute pass plus the sends pulse with no shared cap, which on Monday Nov 9 2026 helped starve the wizard's weekly POD swap (repeated 429s) and made the 10:00am pulse fail inside `listCampaigns`.
+
+While a swap is in progress, Watchdog makes no Smartlead calls:
+
+- The 15-minute watch and the paused-sweep / leads / meeting-drought checks are skipped. The next scheduled tick runs them. HeyReach is not Smartlead and still runs.
+- A sends pulse (and midday or EOD, if they fire during the swap) is stored and posted once, after the swap finishes. It is not marked sent until that post goes out. The post is still that slot's "sent today" line, with the total and each client read from Smartlead at send time.
+
+The signal source is `SWAP_QUIET_SOURCE`:
+
+| Value | Behavior |
+| --- | --- |
+| `auto` (default) | GET `SWAP_SIGNAL_URL` if set, otherwise read `SWAP_SIGNAL_TABLE` when Supabase is configured. A successful answer wins. Anything else uses the window. |
+| `http` | GET `SWAP_SIGNAL_URL` only. Failure uses the window. |
+| `supabase` | Read `SWAP_SIGNAL_TABLE` only. Failure uses the window. |
+| `window` | Ignore the signal. Use the clock only. |
+| `off` | Never go quiet. |
+
+Accepted signal JSON (object, `{ data: ... }`, or a short array of rows; the newest `started_at` wins): `in_progress` / `swap_in_progress` / `status`, plus `started_at` and `finished_at`. A `finished_at` in the past means the swap is over, so Watchdog resumes even inside the Monday window. An open `started_at` older than `SWAP_SIGNAL_MAX_AGE_MINUTES` (default 240) is ignored so a stuck row cannot silence the rest of the day.
+
+Until the wizard PR lands, leave the URL and table empty. The fallback window is Monday 06:00–12:00 America/Chicago (`SWAP_QUIET_WEEKDAYS`, `SWAP_QUIET_START`, `SWAP_QUIET_END`). That covers the 8:00am and 10:00am pulses; both are deferred, not dropped, and run on the first 15-minute tick after noon (or sooner, once a live signal says the swap finished).
+
+Every Smartlead call also goes through a process limiter (`SMARTLEAD_MAX_PER_MINUTE` default 30, `SMARTLEAD_MAX_CONCURRENCY` default 2, `SMARTLEAD_MIN_GAP_MS` default 200). A 429 pauses the limiter for the `Retry-After` header, then retries. The 15-minute pass no longer requests campaign statistics when analytics or the campaign payload already has lead stats, and duplicate GETs inside one pass are reused.
+
+The sends pulse is unchanged: `*sent today*`, one line per client, then `Total N sent`, all from Smartlead analytics-by-date for the Chicago day.
+
 ## Env
 
 See `.env.example`. Minimum:

@@ -71,8 +71,9 @@ import {
   shouldAlertHeyReach,
   weekdayPaceFromStats,
 } from "../lib/heyreach.js";
+import { SwapQuietGate, type SwapQuietDecision } from "../lib/swap-quiet.js";
 import { isWeekendInZone, ymdInZone } from "../lib/time.js";
-import type { StateStore } from "../state/store.js";
+import type { DeferredSmartleadJob, StateStore } from "../state/store.js";
 
 export { resolveClient, resolveClientName } from "../lib/clients.js";
 
@@ -103,8 +104,11 @@ interface PendingCompletion {
   total: number;
 }
 
+export type SmartleadQuietCheck = Pick<SwapQuietGate, "current">;
+
 export class WatchService {
   private readonly heyreachClients: HeyReachWorkspaceClient[];
+  private readonly quiet: SmartleadQuietCheck;
 
   constructor(
     private readonly config: AppConfig,
@@ -113,9 +117,11 @@ export class WatchService {
     private readonly state: StateStore,
     private readonly supabase: SupabaseStore,
     heyreachClients?: HeyReachWorkspaceClient[],
+    quiet?: SmartleadQuietCheck,
   ) {
     this.heyreachClients =
       heyreachClients ?? config.heyreachWorkspaces.map((workspace) => new HeyReachClient(workspace));
+    this.quiet = quiet ?? new SwapQuietGate(config.swapQuiet, { supabase });
   }
 
   /**
@@ -134,42 +140,51 @@ export class WatchService {
       errors: [],
     };
     const allowSlack = !isWeekendInZone(now, this.config.sendShortfallTimezone);
-
-    const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
-    const clientsById = new Map(clients.map((client) => [client.id, client]));
-    const watch = new Set(this.config.watchStatuses);
+    const quiet = await this.quiet.current(now);
     const day = ymdInZone(now, this.config.sendShortfallTimezone);
-    const inventory: ClientCampaignLeadRow[] = [];
-    const pendingCompletion: PendingCompletion[] = [];
+    if (quiet.quiet) {
+      console.log(`[watchdog] skip smartlead checks: ${quiet.reason}`);
+      await this.inspectHeyReach(day, result, allowSlack);
+      return result;
+    }
+    await this.flushDeferred(now);
 
-    for (const campaign of campaigns) {
-      if (isNoiseCampaign(campaign.name)) continue;
-      const status = String(campaign.status ?? "").toUpperCase();
-      if (!watch.has(status)) continue;
-      result.scanned += 1;
-      try {
-        await this.inspectCampaign({
-          campaign,
-          status,
-          clientsById,
-          supabaseCampaigns,
-          registry,
-          day,
-          allowSlack,
-          result,
-          inventory,
-          pendingCompletion,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        result.errors.push(`#${campaign.id} ${campaign.name}: ${message}`);
+    await this.withMemo(async () => {
+      const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
+      const clientsById = new Map(clients.map((client) => [client.id, client]));
+      const watch = new Set(this.config.watchStatuses);
+      const inventory: ClientCampaignLeadRow[] = [];
+      const pendingCompletion: PendingCompletion[] = [];
+
+      for (const campaign of campaigns) {
+        if (isNoiseCampaign(campaign.name)) continue;
+        const status = String(campaign.status ?? "").toUpperCase();
+        if (!watch.has(status)) continue;
+        result.scanned += 1;
+        try {
+          await this.inspectCampaign({
+            campaign,
+            status,
+            clientsById,
+            supabaseCampaigns,
+            registry,
+            day,
+            allowSlack,
+            result,
+            inventory,
+            pendingCompletion,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          result.errors.push(`#${campaign.id} ${campaign.name}: ${message}`);
+        }
+        await sleep(150);
       }
-      await sleep(150);
-    }
 
-    if (allowSlack) {
-      await this.flushCompletionAlerts(pendingCompletion, inventory, result);
-    }
+      if (allowSlack) {
+        await this.flushCompletionAlerts(pendingCompletion, inventory, result);
+      }
+    });
     await this.inspectHeyReach(day, result, allowSlack);
     await this.state.save();
     return result;
@@ -182,7 +197,15 @@ export class WatchService {
    */
   async runPulse(
     now = new Date(),
-  ): Promise<{ posted: boolean; clients: number; under: number; paused: number; unpaused: number }> {
+    opts?: { skipQuietCheck?: boolean; fromFlush?: boolean },
+  ): Promise<{
+    posted: boolean;
+    deferred?: boolean;
+    clients: number;
+    under: number;
+    paused: number;
+    unpaused: number;
+  }> {
     const timeZone = this.config.sendShortfallTimezone;
     const resolved = resolvePulseSlot(
       now,
@@ -198,9 +221,24 @@ export class WatchService {
     const key = `pulse:v3:${slot}`;
     if (this.state.lastPulseSlot() === slot || (await this.alreadySent(key))) {
       this.state.setLastPulseSlot(slot);
+      this.state.removeDeferredJob("pulse", slot);
       return { posted: false, clients: 0, under: 0, paused: 0, unpaused: 0 };
     }
 
+    if (!opts?.skipQuietCheck) {
+      const quiet = await this.quiet.current(now);
+      if (quiet.quiet) {
+        await this.deferJob("pulse", slot, now, quiet);
+        return { posted: false, deferred: true, clients: 0, under: 0, paused: 0, unpaused: 0 };
+      }
+    }
+    if (!opts?.fromFlush) await this.flushDeferred(now);
+    if (this.state.lastPulseSlot() === slot) {
+      return { posted: false, clients: 0, under: 0, paused: 0, unpaused: 0 };
+    }
+
+    this.beginMemo();
+    try {
     const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
     const clientsById = new Map(clients.map((client) => [client.id, client]));
     const unpaused = await this.resumeBounceHolds({
@@ -277,6 +315,8 @@ export class WatchService {
 
     const rolled = rollupClientPulse(rows);
     if (!rolled.length && !paused.length && !unpaused) {
+      this.state.removeDeferredJob("pulse", slot);
+      await this.state.save();
       return { posted: false, clients: 0, under: 0, paused: 0, unpaused };
     }
 
@@ -312,6 +352,7 @@ export class WatchService {
     });
     this.state.setLastPulseSlot(slot);
     if (!text) {
+      this.state.removeDeferredJob("pulse", slot);
       await this.state.save();
       return {
         posted: false,
@@ -336,6 +377,7 @@ export class WatchService {
         under: underCount,
       },
     });
+    this.state.removeDeferredJob("pulse", slot);
     await this.state.save();
     return {
       posted: true,
@@ -344,6 +386,9 @@ export class WatchService {
       paused: paused.length,
       unpaused,
     };
+    } finally {
+      this.endMemo();
+    }
   }
 
   /**
@@ -352,7 +397,8 @@ export class WatchService {
    */
   async runVolumeCheck(
     now = new Date(),
-  ): Promise<{ posted: boolean; flagged: number; clients: number }> {
+    opts?: { skipQuietCheck?: boolean; fromFlush?: boolean },
+  ): Promise<{ posted: boolean; deferred?: boolean; flagged: number; clients: number }> {
     const timeZone = this.config.sendShortfallTimezone;
     const resolved = resolveVolumeSlot(
       now,
@@ -368,14 +414,28 @@ export class WatchService {
     const key = `volume:v1:${day}`;
     if (this.state.lastVolumeDay() === day || (await this.alreadySent(key))) {
       this.state.setLastVolumeDay(day);
+      this.state.removeDeferredJob("midday", slot);
       return { posted: false, flagged: 0, clients: 0 };
     }
 
-    const rows = await this.collectActiveClientRows(now, day);
+    if (!opts?.skipQuietCheck) {
+      const quiet = await this.quiet.current(now);
+      if (quiet.quiet) {
+        await this.deferJob("midday", slot, now, quiet);
+        return { posted: false, deferred: true, flagged: 0, clients: 0 };
+      }
+    }
+    if (!opts?.fromFlush) await this.flushDeferred(now);
+    if (this.state.lastVolumeDay() === day) {
+      return { posted: false, flagged: 0, clients: 0 };
+    }
+
+    const rows = await this.withMemo(() => this.collectActiveClientRows(now, day));
     const rolled = rollupClientVolume(rows, now, timeZone, this.config.volumeHour);
     const text = formatMiddayReport(rolled, day);
     this.state.setLastVolumeDay(day);
     if (!text) {
+      this.state.removeDeferredJob("midday", slot);
       await this.state.save();
       return { posted: false, flagged: 0, clients: rolled.length };
     }
@@ -397,6 +457,7 @@ export class WatchService {
         })),
       },
     });
+    this.state.removeDeferredJob("midday", slot);
     await this.state.save();
     return {
       posted: true,
@@ -411,7 +472,8 @@ export class WatchService {
    */
   async runEndOfDay(
     now = new Date(),
-  ): Promise<{ posted: boolean; under: number; topUp: number; clients: number }> {
+    opts?: { skipQuietCheck?: boolean; fromFlush?: boolean },
+  ): Promise<{ posted: boolean; deferred?: boolean; under: number; topUp: number; clients: number }> {
     const timeZone = this.config.sendShortfallTimezone;
     const resolved = resolveEodSlot(now, timeZone, this.config.volumeWeekdays, this.config.eodHour);
     if (!resolved) {
@@ -422,10 +484,23 @@ export class WatchService {
     const key = `eod:v1:${day}`;
     if (this.state.lastEodDay() === day || (await this.alreadySent(key))) {
       this.state.setLastEodDay(day);
+      this.state.removeDeferredJob("eod", slot);
       return { posted: false, under: 0, topUp: 0, clients: 0 };
     }
 
-    const rows = await this.collectActiveClientRows(now, day);
+    if (!opts?.skipQuietCheck) {
+      const quiet = await this.quiet.current(now);
+      if (quiet.quiet) {
+        await this.deferJob("eod", slot, now, quiet);
+        return { posted: false, deferred: true, under: 0, topUp: 0, clients: 0 };
+      }
+    }
+    if (!opts?.fromFlush) await this.flushDeferred(now);
+    if (this.state.lastEodDay() === day) {
+      return { posted: false, under: 0, topUp: 0, clients: 0 };
+    }
+
+    const rows = await this.withMemo(() => this.collectActiveClientRows(now, day));
     const rolled = rollupClientEod(
       rows,
       this.config.volumeTargetSends,
@@ -434,6 +509,7 @@ export class WatchService {
     const text = formatEodReport(rolled, day, this.config.volumeTargetSends);
     this.state.setLastEodDay(day);
     if (!text) {
+      this.state.removeDeferredJob("eod", slot);
       await this.state.save();
       return { posted: false, under: 0, topUp: 0, clients: rolled.length };
     }
@@ -457,6 +533,7 @@ export class WatchService {
         })),
       },
     });
+    this.state.removeDeferredJob("eod", slot);
     await this.state.save();
     return {
       posted: true,
@@ -684,6 +761,64 @@ export class WatchService {
     };
   }
 
+  private async deferJob(
+    kind: DeferredSmartleadJob["kind"],
+    slot: string,
+    firedAt: Date,
+    quiet: SwapQuietDecision,
+  ): Promise<void> {
+    this.state.deferJob({ kind, slot, firedAt: firedAt.toISOString() });
+    await this.state.save();
+    console.log(`[watchdog] defer ${kind} ${slot}: ${quiet.reason}`);
+  }
+
+  /**
+   * Post Smartlead jobs that were held for the POD swap. One pass, oldest
+   * first. A failure leaves that job and everything after it for the next tick.
+   */
+  private async flushDeferred(now: Date): Promise<void> {
+    const jobs = this.state.deferredJobs();
+    if (!jobs.length) return;
+    for (const job of jobs) {
+      try {
+        console.log(`[watchdog] running deferred ${job.kind} ${job.slot} after ${now.toISOString()}`);
+        const firedAt = new Date(job.firedAt);
+        if (job.kind === "pulse") {
+          await this.runPulse(firedAt, { skipQuietCheck: true, fromFlush: true });
+        } else if (job.kind === "midday") {
+          await this.runVolumeCheck(firedAt, { skipQuietCheck: true, fromFlush: true });
+        } else {
+          await this.runEndOfDay(firedAt, { skipQuietCheck: true, fromFlush: true });
+        }
+        this.state.removeDeferredJob(job.kind, job.slot);
+        await this.state.save();
+      } catch (error) {
+        console.error(
+          `[watchdog] deferred ${job.kind} ${job.slot} failed`,
+          error instanceof Error ? error.message : error,
+        );
+        return;
+      }
+    }
+  }
+
+  private beginMemo(): void {
+    this.smartlead.beginReadMemo?.();
+  }
+
+  private endMemo(): void {
+    this.smartlead.endReadMemo?.();
+  }
+
+  private async withMemo<T>(fn: () => Promise<T>): Promise<T> {
+    this.beginMemo();
+    try {
+      return await fn();
+    } finally {
+      this.endMemo();
+    }
+  }
+
   private async loadDirectories(): Promise<
     [SmartleadCampaign[], SmartleadClientRecord[], Map<number, CampaignNameRow>, Map<number, string>]
   > {
@@ -715,12 +850,17 @@ export class WatchService {
     const firstSeen = !snapshot.seen;
     const campaignName = input.campaign.name;
 
-    const [detail, settings, analytics, statistics] = await Promise.all([
+    // Analytics wins over the statistics page for lead counts. Skip that
+    // extra read when analytics already parsed. Statistics stays the fallback
+    // when analytics has no lead stats, even if the campaign payload does.
+    const [detail, settings, analytics] = await Promise.all([
       this.smartlead.getCampaign(input.campaign.id).catch(() => input.campaign),
       this.smartlead.getCampaignSettings(input.campaign.id).catch(() => null),
       this.smartlead.getCampaignAnalytics(input.campaign.id).catch(() => null),
-      this.smartlead.getCampaignStatistics(input.campaign.id).catch(() => null),
     ]);
+    const statistics = parseCampaignLeadStats(analytics)
+      ? null
+      : await this.smartlead.getCampaignStatistics(input.campaign.id).catch(() => null);
 
     const resolved = resolveClient(
       input.campaign,

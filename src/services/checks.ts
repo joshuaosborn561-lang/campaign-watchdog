@@ -35,6 +35,7 @@ import { isNoiseCampaign } from "../lib/names.js";
 import { pausedSweepSkipReason, type PausedSweepSkip } from "../lib/paused-sweep.js";
 import { asRecordArray, unwrap } from "../lib/parse.js";
 import { analyzeSignature } from "../lib/signature.js";
+import { SwapQuietGate, type SwapQuietDecision } from "../lib/swap-quiet.js";
 import { hourInZone, isWeekendInZone, ymdInZone } from "../lib/time.js";
 import type { ChecksStore } from "../state/checks-store.js";
 
@@ -116,13 +117,26 @@ export interface DroughtReport {
  * same channel the rest of Watchdog uses.
  */
 export class ChecksService {
+  private readonly quiet: Pick<SwapQuietGate, "current">;
+
   constructor(
     private readonly config: AppConfig,
     private readonly smartlead: SmartleadClient,
     private readonly slack: SlackClient,
     private readonly supabase: SupabaseStore,
     private readonly store: ChecksStore,
-  ) {}
+    quiet?: Pick<SwapQuietGate, "current">,
+  ) {
+    this.quiet = quiet ?? new SwapQuietGate(config.swapQuiet, { supabase });
+  }
+
+  /** Wizard POD swap owns the shared Smartlead budget. Checks wait for the next cron. */
+  private async swapQuiet(now: Date): Promise<SwapQuietDecision | null> {
+    const decision = await this.quiet.current(now);
+    if (!decision.quiet) return null;
+    console.log(`[watchdog] skip smartlead check: ${decision.reason}`);
+    return decision;
+  }
 
   private resolveMode(configured: string, opts: CheckRunOptions): "off" | "dry-run" | "live" {
     if (opts.forceDryRun) return "dry-run";
@@ -204,6 +218,8 @@ export class ChecksService {
     if (mode === "live" && this.outsideLiveWindow(now, opts)) {
       return { ...report, reason: "outside weekday 6am-8pm CT" };
     }
+    const quiet = await this.swapQuiet(now);
+    if (quiet) return { ...report, reason: quiet.reason };
     report.ran = true;
 
     const dirs = await this.loadDirectories();
@@ -377,6 +393,8 @@ export class ChecksService {
     if (mode === "live" && this.outsideLiveWindow(now, opts)) {
       return { ...report, reason: "outside weekday 6am-8pm CT" };
     }
+    const quiet = await this.swapQuiet(now);
+    if (quiet) return { ...report, reason: quiet.reason };
     report.ran = true;
 
     const dirs = await this.loadDirectories();
@@ -578,6 +596,8 @@ export class ChecksService {
       return { ...report, reason: "outside weekday 6am-8pm CT" };
     }
     if (!this.supabase.enabled()) return { ...report, reason: "Supabase not configured (no booking source)" };
+    const quiet = await this.swapQuiet(now);
+    if (quiet) return { ...report, reason: quiet.reason };
     report.ran = true;
 
     const dirs = await this.loadDirectories();
