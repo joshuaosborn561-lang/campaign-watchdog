@@ -1,5 +1,6 @@
-import { apiRequest, sleep } from "../lib/http.js";
+import { ApiError, apiRequest, sleep, type RequestOptions } from "../lib/http.js";
 import { asRecordArray, asNumber, pickString, unwrap } from "../lib/parse.js";
+import { SmartleadLimiter } from "../lib/smartlead-limiter.js";
 
 const BASE_URL = "https://server.smartlead.ai/api/v1/";
 
@@ -69,34 +70,70 @@ export interface SmartleadEmailAccount {
   time_to_wait_in_mins?: number;
 }
 
+export interface SmartleadClientOptions {
+  limiter?: SmartleadLimiter;
+  /** Account-wide cap is 200/min. Wizard already uses ~150. Default leaves headroom. */
+  maxPerMinute?: number;
+  concurrency?: number;
+  minGapMs?: number;
+  /** Extra attempts after the first. 429s wait on Retry-After before the next try. */
+  maxRetries?: number;
+}
+
 export class SmartleadClient {
-  constructor(private readonly apiKey: string) {}
+  private readonly limiter: SmartleadLimiter;
+  private readonly maxRetries: number;
+  /** Successful GETs reused for the current watch or pulse pass. */
+  private memo: Map<string, Promise<unknown>> | null = null;
+
+  constructor(
+    private readonly apiKey: string,
+    options: SmartleadClientOptions = {},
+  ) {
+    this.limiter =
+      options.limiter ??
+      new SmartleadLimiter({
+        maxPerMinute: options.maxPerMinute,
+        concurrency: options.concurrency,
+        minGapMs: options.minGapMs,
+      });
+    this.maxRetries = options.maxRetries ?? 4;
+  }
+
+  /** Collapse duplicate GETs inside one pass (resume + pulse both read analytics). */
+  beginReadMemo(): void {
+    this.memo = new Map();
+  }
+
+  endReadMemo(): void {
+    this.memo = null;
+  }
 
   async listCampaigns(): Promise<SmartleadCampaign[]> {
-    const raw = await apiRequest<unknown>(BASE_URL, this.apiKey, "campaigns/");
+    const raw = await this.request<unknown>("campaigns/");
     return asRecordArray(raw)
       .map(normalizeCampaign)
       .filter((row): row is SmartleadCampaign => row != null);
   }
 
   listClients(): Promise<SmartleadClientRecord[]> {
-    return apiRequest<SmartleadClientRecord[]>(BASE_URL, this.apiKey, "client/");
+    return this.request<SmartleadClientRecord[]>("client/");
   }
 
   getCampaign(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}`);
+    return this.request(`campaigns/${campaignId}`);
   }
 
   getCampaignSettings(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/settings`);
+    return this.request(`campaigns/${campaignId}/settings`);
   }
 
   getCampaignAnalytics(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/analytics`);
+    return this.request(`campaigns/${campaignId}/analytics`);
   }
 
   getCampaignStatistics(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/statistics`);
+    return this.request(`campaigns/${campaignId}/statistics`);
   }
 
   /** Paged sent-email statistics. `total_stats` is the count; `data[].email_message` is the sent body. */
@@ -110,7 +147,7 @@ export class SmartleadClient {
       sentEndDate?: string;
     },
   ): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/statistics`, {
+    return this.request(`campaigns/${campaignId}/statistics`, {
       query: {
         offset: query.offset ?? 0,
         limit: query.limit,
@@ -126,7 +163,7 @@ export class SmartleadClient {
     startDate: string,
     endDate: string,
   ): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/analytics-by-date`, {
+    return this.request(`campaigns/${campaignId}/analytics-by-date`, {
       query: { start_date: startDate, end_date: endDate },
     });
   }
@@ -136,18 +173,14 @@ export class SmartleadClient {
     status: SmartleadCampaignStatusWrite,
   ): Promise<unknown> {
     const allowed = assertAllowedCampaignStatus(campaignId, status);
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/status`, {
+    return this.request(`campaigns/${campaignId}/status`, {
       method: "POST",
       body: { status: allowed },
     });
   }
 
   async getCampaignEmailAccounts(campaignId: number): Promise<SmartleadEmailAccount[]> {
-    const raw = await apiRequest<unknown>(
-      BASE_URL,
-      this.apiKey,
-      `campaigns/${campaignId}/email-accounts`,
-    );
+    const raw = await this.request<unknown>(`campaigns/${campaignId}/email-accounts`);
     return asRecordArray(raw).map((row) => ({
       id: asNumber(row.id) ?? 0,
       from_email: pickString(row, ["from_email", "fromEmail"]),
@@ -161,6 +194,48 @@ export class SmartleadClient {
       minTimeToWaitInMins: asNumber(row.minTimeToWaitInMins),
       time_to_wait_in_mins: asNumber(row.time_to_wait_in_mins),
     }));
+  }
+
+  private request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    const method = (options.method ?? "GET").toUpperCase();
+    if (method !== "GET" || !this.memo) return this.requestOnce<T>(path, options);
+    const key = `${method} ${path} ${JSON.stringify(options.query ?? {})}`;
+    const hit = this.memo.get(key);
+    if (hit) return hit as Promise<T>;
+    const pending = this.requestOnce<T>(path, options);
+    this.memo.set(key, pending);
+    pending.catch(() => {
+      if (this.memo?.get(key) === pending) this.memo.delete(key);
+    });
+    return pending;
+  }
+
+  /**
+   * One logical Smartlead call. The limiter spaces starts. A 429 pauses the
+   * limiter (Retry-After when present) and is tried again. Other 4xx are not
+   * retried. The slot is released before the pause so waiters share it.
+   */
+  private async requestOnce<T>(path: string, options: RequestOptions): Promise<T> {
+    const retries = options.retries ?? this.maxRetries;
+    let last: unknown;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        return await this.limiter.schedule(() =>
+          apiRequest<T>(BASE_URL, this.apiKey, path, { ...options, retries: 0 }),
+        );
+      } catch (error) {
+        last = error;
+        const status = error instanceof ApiError ? error.status : 0;
+        const retryable = status === 0 || status === 429 || status >= 500;
+        if (!retryable || attempt >= retries) break;
+        if (status === 429) {
+          this.limiter.noteRateLimit(error instanceof ApiError ? error.retryAfterMs : undefined);
+        } else {
+          await sleep(Math.min(30_000, 500 * 2 ** attempt));
+        }
+      }
+    }
+    throw last instanceof Error ? last : new Error(String(last));
   }
 }
 

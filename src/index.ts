@@ -4,6 +4,7 @@ import { loadConfig } from "./config.js";
 import { SlackClient } from "./clients/slack.js";
 import { SmartleadClient } from "./clients/smartlead.js";
 import { SupabaseStore } from "./clients/supabase.js";
+import { SwapQuietGate, formatClock } from "./lib/swap-quiet.js";
 import { ChecksService } from "./services/checks.js";
 import { WatchService } from "./services/watch.js";
 import { ChecksStore } from "./state/checks-store.js";
@@ -29,12 +30,17 @@ async function main(): Promise<void> {
     tokenFilePath: config.stateFilePath.replace(/watchdog-state\.json$/, "slack-tokens.json"),
   });
 
-  const smartlead = new SmartleadClient(config.smartleadApiKey);
-  const watch = new WatchService(config, smartlead, slack, state, supabase);
+  const smartlead = new SmartleadClient(config.smartleadApiKey, {
+    maxPerMinute: config.smartleadMaxPerMinute,
+    concurrency: config.smartleadMaxConcurrency,
+    minGapMs: config.smartleadMinGapMs,
+  });
+  const quiet = new SwapQuietGate(config.swapQuiet, { supabase });
+  const watch = new WatchService(config, smartlead, slack, state, supabase, undefined, quiet);
 
   const checksStore = new ChecksStore(config.checksStateFilePath);
   await checksStore.load();
-  const checks = new ChecksService(config, smartlead, slack, supabase, checksStore);
+  const checks = new ChecksService(config, smartlead, slack, supabase, checksStore, quiet);
   /** One run per check at a time; the checks are independent of the 15-minute watch. */
   const checkBusy = new Set<string>();
   const runCheck = async (name: string, fn: () => Promise<unknown>): Promise<unknown> => {
@@ -132,7 +138,7 @@ async function main(): Promise<void> {
       await state.load();
       const pulse = await watch.runPulse(firedAt);
       console.log(
-        `[watchdog] ${reason} posted=${pulse.posted} clients=${pulse.clients} under=${pulse.under} paused=${pulse.paused} unpaused=${pulse.unpaused}`,
+        `[watchdog] ${reason} posted=${pulse.posted} deferred=${pulse.deferred ?? false} clients=${pulse.clients} under=${pulse.under} paused=${pulse.paused} unpaused=${pulse.unpaused}`,
       );
     } catch (error) {
       console.error("[watchdog] pulse failed", error);
@@ -228,7 +234,11 @@ async function main(): Promise<void> {
   app.post("/checks/meeting-drought", checkRoute("meeting-drought", (o) => checks.runMeetingDrought(o)));
 
   app.listen(config.port, config.host, () => {
+    const quiet = config.swapQuiet;
     console.log(`[watchdog] listening on ${config.host}:${config.port}`);
+    console.log(
+      `[watchdog] smartlead cap ${config.smartleadMaxPerMinute}/min concurrency ${config.smartleadMaxConcurrency}; swap quiet source=${quiet.source} weekdays=${quiet.weekdays.join(",")} ${formatClock(quiet.startMinutes)}-${formatClock(quiet.endMinutes)} ${quiet.timeZone}`,
+    );
   });
 
   cron.schedule(

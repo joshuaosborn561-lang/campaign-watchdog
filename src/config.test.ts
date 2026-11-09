@@ -40,6 +40,14 @@ describe("loadConfig", () => {
     assert.equal(config.volumeAlertMax, 1080);
     assert.equal(config.eodCron, "30 17 * * 1-5");
     assert.equal(config.eodHour, 17);
+    assert.equal(config.smartleadMaxPerMinute, 30);
+    assert.equal(config.smartleadMaxConcurrency, 2);
+    assert.equal(config.swapQuiet.source, "auto");
+    assert.equal(config.swapQuiet.signalUrl, "");
+    assert.deepEqual(config.swapQuiet.weekdays, [1]);
+    assert.equal(config.swapQuiet.startMinutes, 6 * 60);
+    assert.equal(config.swapQuiet.endMinutes, 12 * 60);
+    assert.equal(config.swapQuiet.timeZone, "America/Chicago");
     assert.equal(config.autoResumeBounceHolds, true);
     assert.deepEqual(config.bounceResumeExcludeIds, DEFAULT_BOUNCE_RESUME_EXCLUDE_IDS);
     assert.deepEqual(config.bounceResumeExcludeIds, [
@@ -60,6 +68,22 @@ describe("loadConfig", () => {
     } as NodeJS.ProcessEnv);
     assert.equal(off.autoResumeBounceHolds, false);
     assert.deepEqual(off.bounceResumeExcludeIds, [11, 22]);
+
+    const quiet = loadConfig({
+      SMARTLEAD_API_KEY: "sl-key",
+      SLACK_BOT_TOKEN: "xoxb-test",
+      SWAP_QUIET_SOURCE: "http",
+      SWAP_SIGNAL_URL: "https://wizard.example/swap",
+      SWAP_QUIET_START: "07:30",
+      SWAP_QUIET_END: "11:00",
+      SWAP_QUIET_WEEKDAYS: "1",
+      SMARTLEAD_MAX_PER_MINUTE: "40",
+    } as NodeJS.ProcessEnv);
+    assert.equal(quiet.swapQuiet.source, "http");
+    assert.equal(quiet.swapQuiet.signalUrl, "https://wizard.example/swap");
+    assert.equal(quiet.swapQuiet.startMinutes, 7 * 60 + 30);
+    assert.equal(quiet.swapQuiet.endMinutes, 11 * 60);
+    assert.equal(quiet.smartleadMaxPerMinute, 40);
   });
 
   it("keeps Slack mention ids but leaves tagging off unless SLACK_MENTION_UNDER is set", () => {

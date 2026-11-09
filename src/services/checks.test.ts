@@ -72,6 +72,20 @@ const camps: SmartleadCampaign[] = [
 ];
 
 describe("ChecksService paused sweep", () => {
+  it("does not call Smartlead during the Monday swap window", async () => {
+    const { sl, service } = build(camps);
+    let lists = 0;
+    const listCampaigns = sl.listCampaigns;
+    sl.listCampaigns = async () => {
+      lists += 1;
+      return listCampaigns();
+    };
+    const report = await service.runPausedSweep({ now: new Date("2026-11-09T16:05:00.000Z") });
+    assert.equal(report.ran, false);
+    assert.match(report.reason ?? "", /swap window/);
+    assert.equal(lists, 0);
+  });
+
   it("defaults to dry-run: lists what it would start and never writes status", async () => {
     const { sl, service } = build(camps);
     assert.equal(service["config"].pausedSweepMode, "dry-run");

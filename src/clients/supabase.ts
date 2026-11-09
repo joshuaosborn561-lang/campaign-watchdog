@@ -127,6 +127,29 @@ export class SupabaseStore {
     });
   }
 
+  /**
+   * Latest wizard "swap in progress" row. A missing table is an error the
+   * caller turns into the Monday-window fallback. One small read, not a scan.
+   */
+  async fetchSwapSignal(table: string, schema = "public", rowId = ""): Promise<unknown> {
+    assertIdentifier(table, "SWAP_SIGNAL_TABLE");
+    assertIdentifier(schema, "SWAP_SIGNAL_SCHEMA");
+    const idFilter = rowId ? `id=eq.${encodeURIComponent(rowId)}&limit=1` : "";
+    if (idFilter) {
+      return this.select<Record<string, unknown>>(table, "*", idFilter, schema);
+    }
+    try {
+      return await this.select<Record<string, unknown>>(
+        table,
+        "*",
+        "order=started_at.desc&limit=5",
+        schema,
+      );
+    } catch {
+      return this.select<Record<string, unknown>>(table, "*", "limit=5", schema);
+    }
+  }
+
   async readSlackTokens(): Promise<{ access_token?: string; refresh_token?: string } | null> {
     const rows = await this.select<{
       access_token?: string;
@@ -211,5 +234,11 @@ export class SupabaseStore {
       throw new Error(`Supabase ${options.method} ${path} failed: ${response.status} ${text}`);
     }
     return response;
+  }
+}
+
+function assertIdentifier(value: string, name: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw new Error(`${name} must be a single identifier`);
   }
 }

@@ -44,6 +44,19 @@ describe("StateStore", () => {
       await state.load();
       assert.equal(state.heyreachSnapshot("techevo", 566902).notifiedUnder7, false);
       assert.equal(state.heyreachSnapshot("techevo", 566902).notifiedPendingDry, false);
+
+      state.deferJob({ kind: "pulse", slot: "2026-11-09T10", firedAt: "2026-11-09T16:05:00.000Z" });
+      state.deferJob({ kind: "pulse", slot: "2026-11-09T10", firedAt: "2026-11-09T16:06:00.000Z" });
+      await state.save();
+      const reloaded = new StateStore(filePath);
+      await reloaded.load();
+      assert.deepEqual(reloaded.deferredJobs(), [
+        { kind: "pulse", slot: "2026-11-09T10", firedAt: "2026-11-09T16:05:00.000Z" },
+      ]);
+      reloaded.removeDeferredJob("pulse", "2026-11-09T10");
+      await reloaded.save();
+      await state.load();
+      assert.deepEqual(state.deferredJobs(), []);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
