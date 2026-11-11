@@ -48,9 +48,12 @@ describe("owner catalog", () => {
     assert.deepEqual(sgOwnerSlugs([{ tag_name: "sg-owner:deeproots" }]), ["deep_roots"]);
   });
 
-  it("marks ciotola inactive and everyone else active", () => {
+  it("marks churned owners inactive (portal clients.active=false on 2026-11-11) and everyone else active", () => {
     assert.equal(ownerBySlug("ciotola")?.active, false);
-    assert.equal(OWNER_CATALOG.filter((e) => !e.active).map((e) => e.slug).join(), "ciotola");
+    assert.equal(
+      OWNER_CATALOG.filter((e) => !e.active).map((e) => e.slug).sort().join(),
+      ["ciotola", "cornerstone", "deep_roots", "msrs", "nieto", "vasco"].sort().join(),
+    );
   });
 
   it("reads sg-owner slugs from Smartlead tag objects and ignores other tags", () => {

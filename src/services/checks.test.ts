@@ -192,7 +192,8 @@ describe("ChecksService with sg-owner tags (client_id null)", () => {
     assert.equal(report.wouldStart[0]?.client, "Roofs by Peterson");
     assert.equal(report.noClientPaused, 2); // 63 untagged, 64 ambiguous
     assert.ok(report.skipped.some((r) => r.id === 62 && r.reason === "inactive client"));
-    assert.ok(report.skipped.some((r) => r.id === 65 && r.reason === "excluded client"));
+    // Vasco is churned (inactive) and also on the exclude list; inactive is checked first.
+    assert.ok(report.skipped.some((r) => r.id === 65 && r.reason === "inactive client"));
     assert.equal(sl.calls.length, 0);
   });
 

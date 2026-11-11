@@ -54,15 +54,16 @@ export const OWNER_CATALOG: readonly OwnerCatalogEntry[] = [
   { slug: "bpltg", legacyClientId: 602897, name: "BPLTG", smartleadName: "BPLTG", smartleadLogo: "BPLTG", active: true },
   { slug: "nexus", legacyClientId: 607522, name: "Nexus Dynamics Group", smartleadName: "Nexus Dynamics Group", smartleadLogo: "Nexus Dynamics Group", active: true },
   { slug: "virtual_pulsar", legacyClientId: 607625, name: "Virtual Pulsar", smartleadName: "Virtual Pulsar", smartleadLogo: "Virtual Pulsar", active: true },
-  { slug: "deep_roots", aliases: ["deeproots"], legacyClientId: 597783, name: "Deep Roots Capital", active: true },
+  { slug: "deep_roots", aliases: ["deeproots"], legacyClientId: 597783, name: "Deep Roots Capital", active: false },
   // Retired: already excluded by id 548609 in the paused-sweep / leads skip lists.
-  { slug: "vasco", legacyClientId: 548609, name: "Vasco Warranty", active: true },
+  { slug: "vasco", legacyClientId: 548609, name: "Vasco Warranty", active: false },
   // Inactive. Its campaigns lived inside the SalesGlider space; it never had its own id.
+  // Inactive = portal clients.active=false (2026-11-11): never auto-started / auto-resumed.
   { slug: "ciotola", legacyClientId: null, name: "Ciotola", active: false },
   // Tagged owners that never had a Smartlead space: no numeric id.
-  { slug: "cornerstone", legacyClientId: null, name: "Cornerstone Earthworks", active: true },
-  { slug: "nieto", legacyClientId: null, name: "Nieto", active: true },
-  { slug: "msrs", legacyClientId: null, name: "MSRS", active: true },
+  { slug: "cornerstone", legacyClientId: null, name: "Cornerstone Earthworks", active: false },
+  { slug: "nieto", legacyClientId: null, name: "Nieto", active: false },
+  { slug: "msrs", legacyClientId: null, name: "MSRS", active: false },
   { slug: "positive", legacyClientId: null, name: "Positive", active: true },
 ];
 
