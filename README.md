@@ -4,6 +4,8 @@ Railway app that posts weekday Slack updates to `#campaign-watchdog` (`C0BT978GS
 
 **Hard rule:** Watchdog never pauses or stops a campaign, for any reason — not bounce rate, not a client-level hold, not `bounce_auto_pause_threshold`. The Smartlead client refuses `PAUSED` / `STOPPED` and logs the attempt. High bounce is Slack-only. The weekday 2-hour pulse can `START` bounce-protection holds that are already `PAUSED` (see below). It never `START`s a `STOPPED` campaign.
 
+**Canon: no deliverability testing (Josh, Nov 11 2026).** No placement tests, canaries, or known-good sends. This supersedes the "daily Auto placement test on every campaign" rule and any older canary/placement rules. Health is judged by the deliverabilitywizard's daily per-mailbox metrics (reply rate, bounce rate, warmup score) and weekly report; trend flags alert only. Optional Sunday-only testing exists in the wizard behind `SUNDAY_PLACEMENT_TEST_ENABLED` but is OFF unless Josh approves. Watchdog has no check, unpause gate, or alert that depends on placement tests, canaries, known-good results, or `missing_canary` / `no_placement_test`, and must not add one. The leftover `Canary shell: #…` campaigns (PAUSED/STOPPED) stay excluded from Slack and reports (`isCanaryShell` in `src/lib/names.ts`).
+
 ## What posts (final)
 
 | Post | When | Copy |
