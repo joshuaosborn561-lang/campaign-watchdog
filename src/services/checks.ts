@@ -220,6 +220,11 @@ export class ChecksService {
     const startable: Array<{ campaign: SmartleadCampaign; client: string; senders: number; leadsLeft: number }> = [];
     for (const campaign of paused) {
       const client = this.clientOf(campaign, dirs);
+      if (client.inactive) {
+        // Inactive owner (e.g. ciotola): reported, never started.
+        report.skipped.push({ id: campaign.id, name: campaign.name, client: client.clientName, reason: "inactive client" });
+        continue;
+      }
       if (client.clientId == null) {
         report.noClientPaused += 1;
         continue;
@@ -389,7 +394,10 @@ export class ChecksService {
     const active = dirs.campaigns
       .filter((campaign) => String(campaign.status ?? "").trim().toUpperCase() === "ACTIVE")
       .map((campaign) => ({ campaign, client: this.clientOf(campaign, dirs) }))
-      .filter((row) => row.client.clientId != null && !isNoiseCampaign(row.campaign.name));
+      .filter(
+        (row) =>
+          row.client.clientId != null && !row.client.inactive && !isNoiseCampaign(row.campaign.name),
+      );
     report.activeClientCampaigns = active.length;
 
     const skipRules = {

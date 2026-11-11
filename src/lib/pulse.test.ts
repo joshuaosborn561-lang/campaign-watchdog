@@ -609,3 +609,32 @@ describe("client pulse", () => {
     );
   });
 });
+
+describe("rollupClientPulse with sg-owner tags (scripts/pulse-today.ts path)", () => {
+  it("groups tagged client_id-null campaigns by owner via resolveClient, untagged as Unknown", async () => {
+    const { resolveClient } = await import("./clients.js");
+    const { catalogClientRecords } = await import("./owners.js");
+    const clientsById = new Map(catalogClientRecords().map((c) => [c.id, c]));
+    const tag = (slug: string) => [{ tag_name: `sg-owner:${slug}` }];
+    const campaigns = [
+      { id: 1, client_id: null, tags: tag("parlay"), sent: 100 },
+      { id: 2, client_id: null, tags: tag("parlay"), sent: 50 },
+      { id: 3, client_id: null, tags: tag("emcor"), sent: 30 },
+      { id: 4, client_id: null, tags: [], sent: 5 },
+    ];
+    const rolled = rollupClientPulse(
+      campaigns.map((c) => {
+        const owner = resolveClient(c, clientsById, new Map(), new Map());
+        return { clientId: owner.clientId, clientName: owner.clientName, sent: c.sent, bounced: 0 };
+      }),
+    );
+    assert.deepEqual(
+      rolled.map((r) => [r.clientId, r.clientName, r.sent]),
+      [
+        [418274, "Parlay Tech", 150],
+        [574020, "Emcor", 30],
+        [null, "Unknown client", 5],
+      ],
+    );
+  });
+});

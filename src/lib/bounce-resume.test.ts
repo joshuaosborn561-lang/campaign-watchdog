@@ -118,3 +118,21 @@ describe("bounce-resume selection", () => {
     assert.equal(bounceResumeSkipReason(hold({ id: 99, status: "ACTIVE" }), rules()), "not paused");
   });
 });
+
+describe("bounce-resume and inactive owners", () => {
+  it("never resumes an inactive owner's hold, even with an id, senders and leads", () => {
+    assert.equal(
+      bounceResumeSkipReason(hold({ id: 900, clientId: 345263, clientInactive: true }), rules({ now: afterHold })),
+      "inactive client",
+    );
+    assert.equal(
+      bounceResumeSkipReason(hold({ id: 901, clientId: null, clientInactive: true }), rules({ now: afterHold })),
+      "inactive client",
+    );
+  });
+
+  it("still resumes an active owner and still skips an id-less one", () => {
+    assert.equal(bounceResumeSkipReason(hold({ id: 902, clientInactive: false }), rules({ now: afterHold })), null);
+    assert.equal(bounceResumeSkipReason(hold({ id: 903, clientId: null }), rules({ now: afterHold })), "no client");
+  });
+});

@@ -1,4 +1,5 @@
 import { SmartleadClient } from "../src/clients/smartlead.js";
+import { resolveClient } from "../src/lib/clients.js";
 import { isNoiseCampaign } from "../src/lib/names.js";
 import {
   formatClientPulse,
@@ -22,8 +23,11 @@ const hour = hourInZone(now, timeZone);
 const smartlead = new SmartleadClient(apiKey);
 const campaigns = await smartlead.listCampaigns();
 const clients = await smartlead.listClients().catch(() => []);
-const clientName = new Map(clients.map((c) => [c.id, c.logo?.trim() || c.name || `Client ${c.id}`]));
-const rows: Array<{ clientName: string; sent: number; bounced: number }> = [];
+const clientsById = new Map(clients.map((c) => [c.id, c]));
+// Same resolver as the service: sg-owner tag → owner catalog, then client_id. No Supabase here.
+const ownerOf = (campaign: (typeof campaigns)[number]) =>
+  resolveClient(campaign, clientsById, new Map(), new Map());
+const rows: Array<{ clientId: number | null; clientName: string; sent: number; bounced: number }> = [];
 
 for (const campaign of campaigns) {
   const status = String(campaign.status ?? "").toUpperCase();
@@ -32,10 +36,10 @@ for (const campaign of campaigns) {
   try {
     const today = await smartlead.getCampaignAnalyticsByDate(campaign.id, day, day);
     const volume = parseTodayVolume(today, day);
+    const owner = ownerOf(campaign);
     rows.push({
-      clientId: campaign.client_id ?? null,
-      clientName:
-        (campaign.client_id && clientName.get(campaign.client_id)) || "Unknown client",
+      clientId: owner.clientId,
+      clientName: owner.clientName,
       sent: volume.sent,
       bounced: volume.bounced,
     });

@@ -20,6 +20,8 @@ export interface PausedSweepCandidate {
   name: string;
   status?: string;
   clientId: number | null;
+  /** Owner is inactive in the owner catalog (e.g. ciotola): never START. */
+  clientInactive?: boolean;
   linkedMailboxes?: number | null;
   remainingLeads?: number | null;
 }
@@ -34,6 +36,7 @@ export type PausedSweepSkip =
   | "stopped"
   | "not paused"
   | "noise"
+  | "inactive client"
   | "no client"
   | "held on purpose"
   | "excluded id"
@@ -53,6 +56,7 @@ export function pausedSweepSkipReason(
   if (status === "STOPPED") return "stopped";
   if (status !== "PAUSED") return "not paused";
   if (isNoiseCampaign(candidate.name)) return "noise";
+  if (candidate.clientInactive) return "inactive client";
   if (candidate.clientId == null) return "no client";
   if (new Set(rules.holdIds).has(candidate.id)) return "held on purpose";
   if (new Set(rules.excludeIds).has(candidate.id)) return "excluded id";
