@@ -6,6 +6,12 @@ const CANON_MIN_SENDERS = 40;
 
 export const UNDER_REASON_FALLBACK = "pace short of 1,200";
 
+/** `pace short of <daily target>` — same target the *under* band uses. */
+export function underReasonFallback(target?: number | null): string {
+  if (target == null || !Number.isFinite(target) || target <= 0) return UNDER_REASON_FALLBACK;
+  return `pace short of ${fmt(target)}`;
+}
+
 export type UnderReasonKind =
   | "leads"
   | "senders"
@@ -31,6 +37,8 @@ export interface UnderReasonSignals {
   maxLeadsPerDay?: number | null;
   outsideWindow?: boolean;
   alertMax?: number;
+  /** Configured daily send target (VOLUME_TARGET_SENDS) for the pace fallback text. */
+  target?: number | null;
   /** Distinct senders linked to the client's ACTIVE lists. */
   sendersTotal?: number | null;
   /** Of those, senders whose sent-today reached their daily limit. */
@@ -131,7 +139,7 @@ export function explainUnderVolume(input: UnderReasonSignals): UnderReason {
     return { kind: "schedule", text: "outside send window" };
   }
 
-  return { kind: "pace", text: UNDER_REASON_FALLBACK };
+  return { kind: "pace", text: underReasonFallback(input.target) };
 }
 
 function fmt(value: number): string {

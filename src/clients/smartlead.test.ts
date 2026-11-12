@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import {
+  DEFAULT_SMARTLEAD_MIN_INTERVAL_MS,
   ForbiddenCampaignStatusError,
   SmartleadClient,
   assertAllowedCampaignStatus,
+  isCountableCampaignStatus,
   isForbiddenCampaignStatus,
+  parseDayWiseTotals,
+  resetSmartleadThrottle,
+  smartleadMinIntervalMs,
 } from "./smartlead.js";
+
+// Keep the unrelated tests fast; the throttle test sets its own interval.
+process.env.SMARTLEAD_MIN_INTERVAL_MS = "0";
 
 const originalFetch = globalThis.fetch;
 
@@ -147,5 +155,93 @@ describe("Smartlead tags + client catalog (spaces deleted 2026-11-11)", () => {
     const merged = await new SmartleadClient("k").listClients();
     assert.ok(merged.some((row) => row.id === 999 && row.logo === "Revived"));
     assert.ok(merged.some((row) => row.id === 542838));
+  });
+});
+
+describe("Smartlead day-wise totals + throttle", () => {
+  it("parses sent and bounced from day-wise-overall-stats", () => {
+    assert.deepEqual(
+      parseDayWiseTotals({
+        success: true,
+        data: {
+          day_wise_stats: [
+            { date: "12 Nov", email_engagement_metrics: { sent: 688, opened: 0, replied: 0, bounced: 3 } },
+          ],
+        },
+      }),
+      { sent: 688, bounced: 3 },
+    );
+    assert.deepEqual(parseDayWiseTotals({ success: true, data: { day_wise_stats: [] } }), {
+      sent: 0,
+      bounced: 0,
+    });
+    assert.equal(parseDayWiseTotals({ success: false, message: "rate limit" }), null);
+    assert.equal(parseDayWiseTotals({ data: { day_wise_stats: [{ date: "12 Nov" }] } }), null);
+    assert.equal(parseDayWiseTotals(null), null);
+  });
+
+  it("calls analytics/day-wise-overall-stats once with the campaign id list", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: { day_wise_stats: [{ email_engagement_metrics: { sent: 617, bounced: 4 } }] },
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const out = await new SmartleadClient("k").getDayWiseTotals("2026-11-12", [1, 2, 3]);
+    assert.deepEqual(out, { sent: 617, bounced: 4 });
+    assert.equal(calls.length, 1);
+    const url = new URL(calls[0]);
+    assert.equal(url.pathname, "/api/v1/analytics/day-wise-overall-stats");
+    assert.equal(url.searchParams.get("start_date"), "2026-11-12");
+    assert.equal(url.searchParams.get("end_date"), "2026-11-12");
+    assert.equal(url.searchParams.get("campaign_ids"), "1,2,3");
+  });
+
+  it("throws (never returns 0) on an unexpected day-wise shape", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch;
+    await assert.rejects(() => new SmartleadClient("k").getDayWiseTotals("2026-11-12", [1]));
+  });
+
+  it("only counts non-draft campaigns", () => {
+    for (const s of ["ACTIVE", "PAUSED", "COMPLETED", "STOPPED", "active"]) {
+      assert.equal(isCountableCampaignStatus(s), true, s);
+    }
+    for (const s of ["DRAFTED", "drafted", "", undefined]) {
+      assert.equal(isCountableCampaignStatus(s), false, String(s));
+    }
+  });
+
+  it("defaults SMARTLEAD_MIN_INTERVAL_MS to 500 (~120 calls/min)", () => {
+    assert.equal(DEFAULT_SMARTLEAD_MIN_INTERVAL_MS, 500);
+    assert.equal(smartleadMinIntervalMs({}), 500);
+    assert.equal(smartleadMinIntervalMs({ SMARTLEAD_MIN_INTERVAL_MS: "750" }), 750);
+    assert.equal(smartleadMinIntervalMs({ SMARTLEAD_MIN_INTERVAL_MS: "junk" }), 500);
+  });
+
+  it("spaces every Smartlead call by SMARTLEAD_MIN_INTERVAL_MS across clients", async () => {
+    const at: number[] = [];
+    globalThis.fetch = (async () => {
+      at.push(Date.now());
+      return new Response(JSON.stringify([]), { status: 200 });
+    }) as typeof fetch;
+    process.env.SMARTLEAD_MIN_INTERVAL_MS = "60";
+    resetSmartleadThrottle();
+    try {
+      const a = new SmartleadClient("k");
+      const b = new SmartleadClient("k");
+      await Promise.all([a.getCampaign(1), b.getCampaign(2), a.getCampaignSettings(3), b.listClients()]);
+    } finally {
+      process.env.SMARTLEAD_MIN_INTERVAL_MS = "0";
+      resetSmartleadThrottle();
+    }
+    at.sort((x, y) => x - y);
+    assert.equal(at.length, 4);
+    assert.ok(at[3] - at[0] >= 170, `calls not spaced: ${at[3] - at[0]}ms`);
   });
 });

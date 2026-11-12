@@ -6,6 +6,7 @@ import {
 } from "../clients/heyreach.js";
 import {
   SmartleadClient,
+  isCountableCampaignStatus,
   sleep,
   type SmartleadCampaign,
   type SmartleadClientRecord,
@@ -41,7 +42,6 @@ import {
   bouncePercent,
   formatClientPulse,
   isPulseExcludedCampaign,
-  parseTodayVolume,
   pausedSeenOnDay,
   resolvePulseSlot,
   rollupClientPulse,
@@ -56,8 +56,10 @@ import {
   resolveVolumeSlot,
   rollupClientEod,
   rollupClientVolume,
+  type ClientSentTotals,
   type VolumeCampaignInput,
 } from "../lib/volume.js";
+import { countSentTodayByClient, type ClientSentToday } from "../lib/sent-today.js";
 import { unwrap } from "../lib/parse.js";
 import {
   addUtcDays,
@@ -215,12 +217,6 @@ export class WatchService {
       ids: this.config.pulseExcludeCampaignIds,
       names: this.config.pulseExcludeCampaignNames,
     };
-    const rows: Array<{
-      clientId: number | null;
-      clientName: string;
-      sent: number;
-      bounced: number;
-    }> = [];
     const volumeInputs: VolumeCampaignInput[] = [];
     const pausedByKey = new Map<string, { paused: number; bounceHold: boolean }>();
     const paused: PausedPulseRow[] = stillPausedCampaigns(campaigns, pulseExclude).map(
@@ -240,47 +236,63 @@ export class WatchService {
       },
     );
 
+    // Exact sent/bounced: one day-wise call per client over ALL its non-draft lists.
+    const sentToday = await this.sentTodayByClient({
+      campaigns,
+      clientsById,
+      supabaseCampaigns,
+      registry,
+      day,
+      mute: pulseExclude,
+      label: "pulse",
+    });
+
+    // Per-campaign reads now only feed the *under* reason (schedule, leads, senders).
     for (const campaign of campaigns) {
       if (isNoiseCampaign(campaign.name)) continue;
       if (isPulseExcludedCampaign(campaign, pulseExclude)) continue;
       const status = String(campaign.status ?? "").toUpperCase();
-      if (status !== "ACTIVE" && status !== "PAUSED") continue;
+      if (status !== "ACTIVE") continue;
       const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
       try {
-        const parts = await this.fetchVolumeParts(campaign, day, status === "ACTIVE");
-        const volume = parseTodayVolume(parts.today, day);
-        rows.push({
-          clientId: resolvedClient.clientId,
-          clientName: resolvedClient.clientName,
-          sent: volume.sent,
-          bounced: volume.bounced,
+        const parts = await this.fetchVolumeParts(campaign);
+        const input = this.toVolumeInput({
+          resolvedClient,
+          parts,
+          now,
+          timeZone,
+          extra: pausedByKey.get(clientGroupKey(resolvedClient)),
         });
-        if (status === "ACTIVE") {
-          const input = this.toVolumeInput({
-            resolvedClient,
-            parts,
-            volume,
-            now,
-            timeZone,
-            extra: pausedByKey.get(clientGroupKey(resolvedClient)),
-          });
-          if (input) volumeInputs.push(input);
-        }
+        if (input) volumeInputs.push(input);
       } catch (error) {
         console.warn(
           `[watchdog] pulse #${campaign.id} ${campaign.name}:`,
           error instanceof Error ? error.message : error,
         );
       }
-      await sleep(120);
     }
 
-    const rolled = rollupClientPulse(rows);
+    // Same membership as before (clients with an ACTIVE/PAUSED list), plus any
+    // client whose lists sent today and then completed/stopped.
+    const rolled = rollupClientPulse(
+      [...sentToday.totals.entries()]
+        .filter(
+          ([key, row]) => sentToday.liveKeys.has(key) || row.sent > 0 || row.unread > 0,
+        )
+        .map(([, row]) => row),
+    );
     if (!rolled.length && !paused.length && !unpaused) {
       return { posted: false, clients: 0, under: 0, paused: 0, unpaused };
     }
 
-    const volumeRows = rollupClientVolume(volumeInputs, now, timeZone, hour);
+    const volumeRows = rollupClientVolume(
+      volumeInputs,
+      now,
+      timeZone,
+      hour,
+      this.config.volumeTargetSends,
+      sentToday.totals,
+    );
     const clientsWithUnder = attachPulseUnder(rolled, volumeRows);
     const underCount = clientsWithUnder.filter((row) => row.under).length;
     const pausedToday = pausedSeenOnDay(
@@ -371,8 +383,15 @@ export class WatchService {
       return { posted: false, flagged: 0, clients: 0 };
     }
 
-    const rows = await this.collectActiveClientRows(now, day);
-    const rolled = rollupClientVolume(rows, now, timeZone, this.config.volumeHour);
+    const { rows, totals } = await this.collectActiveClientRows(now, day);
+    const rolled = rollupClientVolume(
+      rows,
+      now,
+      timeZone,
+      this.config.volumeHour,
+      this.config.volumeTargetSends,
+      totals,
+    );
     const text = formatMiddayReport(rolled, day);
     this.state.setLastVolumeDay(day);
     if (!text) {
@@ -392,6 +411,7 @@ export class WatchService {
           clientId: row.clientId,
           clientName: row.clientName,
           sent: row.sent,
+          unread: row.unread ?? 0,
           projected: row.projected,
           under: row.under,
         })),
@@ -425,11 +445,12 @@ export class WatchService {
       return { posted: false, under: 0, topUp: 0, clients: 0 };
     }
 
-    const rows = await this.collectActiveClientRows(now, day);
+    const { rows, totals } = await this.collectActiveClientRows(now, day);
     const rolled = rollupClientEod(
       rows,
       this.config.volumeTargetSends,
       this.config.volumeAlertMax,
+      totals,
     );
     const text = formatEodReport(rolled, day, this.config.volumeTargetSends);
     this.state.setLastEodDay(day);
@@ -450,6 +471,7 @@ export class WatchService {
           clientId: row.clientId,
           clientName: row.clientName,
           sent: row.sent,
+          unread: row.unread ?? 0,
           remaining: row.remaining,
           daysLeft: row.daysLeft,
           under: row.under,
@@ -555,7 +577,15 @@ export class WatchService {
     return started;
   }
 
-  private async collectActiveClientRows(now: Date, day: string): Promise<VolumeCampaignInput[]> {
+  /**
+   * Midday / EOD inputs. Sent counts come from the one-call-per-client
+   * day-wise totals (ACTIVE + PAUSED + COMPLETED + STOPPED lists); per-campaign
+   * reads on ACTIVE lists only supply schedule, leads and sender signals.
+   */
+  private async collectActiveClientRows(
+    now: Date,
+    day: string,
+  ): Promise<{ rows: VolumeCampaignInput[]; totals: ClientSentTotals }> {
     const [campaigns, clients, supabaseCampaigns, registry] = await this.loadDirectories();
     const clientsById = new Map(clients.map((client) => [client.id, client]));
     const mute = {
@@ -576,18 +606,26 @@ export class WatchService {
       pausedByKey.set(key, current);
     }
 
+    const sentToday = await this.sentTodayByClient({
+      campaigns,
+      clientsById,
+      supabaseCampaigns,
+      registry,
+      day,
+      mute,
+      label: "volume",
+    });
+
     for (const campaign of campaigns) {
       if (isVolumeSkippedCampaign(campaign, mute)) continue;
       const status = String(campaign.status ?? "").toUpperCase();
       if (status !== "ACTIVE") continue;
       const resolvedClient = resolveClient(campaign, clientsById, supabaseCampaigns, registry);
       try {
-        const parts = await this.fetchVolumeParts(campaign, day, true);
-        const volume = parseTodayVolume(parts.today, day);
+        const parts = await this.fetchVolumeParts(campaign);
         const input = this.toVolumeInput({
           resolvedClient,
           parts,
-          volume,
           now,
           timeZone,
           extra: pausedByKey.get(clientGroupKey(resolvedClient)),
@@ -599,31 +637,73 @@ export class WatchService {
           error instanceof Error ? error.message : error,
         );
       }
-      await sleep(120);
     }
-    return rows;
+    return { rows, totals: sentToday.totals };
   }
 
-  private async fetchVolumeParts(
-    campaign: SmartleadCampaign,
-    day: string,
-    active: boolean,
-  ): Promise<{
-    today: unknown;
+  /**
+   * Exact per-client sent/bounced today: one `day-wise-overall-stats` call per
+   * client (sg-owner resolver) over every non-draft, non-muted campaign. A
+   * failed read is logged and counted as *unread*, never as 0.
+   */
+  private async sentTodayByClient(input: {
+    campaigns: SmartleadCampaign[];
+    clientsById: Map<number, SmartleadClientRecord>;
+    supabaseCampaigns: Map<number, CampaignNameRow>;
+    registry: Map<number, string>;
+    day: string;
+    mute: { ids: number[]; names: string[] };
+    label: string;
+  }): Promise<{ totals: Map<string, ClientSentToday>; liveKeys: Set<string> }> {
+    const liveKeys = new Set<string>();
+    const counted: Array<{ id: number; name: string; clientId: number | null; clientName: string }> =
+      [];
+    for (const campaign of input.campaigns) {
+      if (isVolumeSkippedCampaign(campaign, input.mute)) continue;
+      if (!isCountableCampaignStatus(campaign.status)) continue;
+      const resolvedClient = resolveClient(
+        campaign,
+        input.clientsById,
+        input.supabaseCampaigns,
+        input.registry,
+      );
+      const status = String(campaign.status ?? "").toUpperCase();
+      if (status === "ACTIVE" || status === "PAUSED") liveKeys.add(clientGroupKey(resolvedClient));
+      counted.push({
+        id: campaign.id,
+        name: campaign.name,
+        clientId: resolvedClient.clientId,
+        clientName: resolvedClient.clientName,
+      });
+    }
+    const result = await countSentTodayByClient({
+      source: this.smartlead,
+      day: input.day,
+      campaigns: counted,
+    });
+    const unread = [...result.byKey.values()].reduce((sum, row) => sum + row.unread, 0);
+    console.log(
+      `[watchdog] ${input.label} sent-today: ${result.byKey.size} clients, ${counted.length} campaigns, ${result.calls} Smartlead calls` +
+        (result.bulkFailures ? `, ${result.bulkFailures} day-wise failures` : "") +
+        (unread ? `, ${unread} campaigns UNREAD` : ""),
+    );
+    return { totals: result.byKey, liveKeys };
+  }
+
+  /** ACTIVE-list signals for the *under* reason. Sent counts never come from here. */
+  private async fetchVolumeParts(campaign: SmartleadCampaign): Promise<{
     settings: unknown;
     detail: unknown;
     analytics: unknown;
     accounts: Array<Record<string, unknown>>;
   }> {
-    const [today, settings, detail, analytics, accounts] = await Promise.all([
-      this.smartlead.getCampaignAnalyticsByDate(campaign.id, day, day).catch(() => null),
-      active ? this.smartlead.getCampaignSettings(campaign.id).catch(() => null) : null,
-      active ? this.smartlead.getCampaign(campaign.id).catch(() => campaign) : campaign,
-      active ? this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null) : null,
-      active ? this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []) : [],
+    const [settings, detail, analytics, accounts] = await Promise.all([
+      this.smartlead.getCampaignSettings(campaign.id).catch(() => null),
+      this.smartlead.getCampaign(campaign.id).catch(() => campaign),
+      this.smartlead.getCampaignAnalytics(campaign.id).catch(() => null),
+      this.smartlead.getCampaignEmailAccounts(campaign.id).catch(() => []),
     ]);
     return {
-      today,
       settings,
       detail,
       analytics,
@@ -639,7 +719,6 @@ export class WatchService {
       analytics: unknown;
       accounts: Array<Record<string, unknown>>;
     };
-    volume: { sent: number; bounced: number };
     now: Date;
     timeZone: string;
     extra?: { paused: number; bounceHold: boolean };
@@ -672,8 +751,9 @@ export class WatchService {
     return {
       clientId: input.resolvedClient.clientId,
       clientName: input.resolvedClient.clientName,
-      sent: input.volume.sent,
-      bounced: input.volume.bounced,
+      // Placeholder: the client's exact total is applied in the rollup.
+      sent: 0,
+      bounced: 0,
       remaining: stats?.remaining ?? null,
       schedule,
       attached: fromAccounts?.attached ?? linked,
