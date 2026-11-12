@@ -71,3 +71,20 @@ describe("parseCheckMode", () => {
     assert.equal(parseCheckMode("dry-run", "live"), "dry-run");
   });
 });
+
+describe("pausedSweepSkipReason and inactive owners", () => {
+  it("never starts an inactive owner's campaign", () => {
+    assert.equal(pausedSweepSkipReason({ ...base, clientInactive: true }, rules), "inactive client");
+    assert.equal(
+      pausedSweepSkipReason({ ...base, clientId: null, clientInactive: true }, rules),
+      "inactive client",
+    );
+  });
+
+  it("a STOPPED inactive campaign is still reported as stopped first", () => {
+    assert.equal(
+      pausedSweepSkipReason({ ...base, status: "STOPPED", clientInactive: true }, rules),
+      "stopped",
+    );
+  });
+});

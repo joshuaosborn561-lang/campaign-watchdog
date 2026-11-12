@@ -153,3 +153,107 @@ describe("ChecksService leads check", () => {
     assert.equal(sl.calls.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Smartlead spaces deleted 2026-11-11: client_id is null everywhere and the
+// owner lives only in a unique `sg-owner:<slug>` tag.
+// ---------------------------------------------------------------------------
+
+const ownerTag = (slug: string) => [{ tag_id: 1, tag_name: `sg-owner:${slug}`, tag_color: null }];
+const DOUBLE_SIG =
+  "<div>Hi Sam,</div><div>Still worth 20 minutes?</div><div>— Joshua Osborn</div><div>Joshua Osborn</div><div>SalesGlider</div>";
+
+function buildTagged(campaigns: SmartleadCampaign[], env: Record<string, string> = {}) {
+  const built = build(campaigns, env);
+  // `GET /client` returns [] now.
+  built.sl.listClients = async () => [];
+  return built;
+}
+
+const taggedPaused: SmartleadCampaign[] = [
+  { id: 61, name: "Peterson C2", status: "PAUSED", client_id: null, tags: ownerTag("peterson") },
+  { id: 62, name: "Ciotola Old Lane", status: "PAUSED", client_id: null, tags: ownerTag("ciotola") },
+  { id: 63, name: "Untagged leftover", status: "PAUSED", client_id: null, tags: [] },
+  {
+    id: 64,
+    name: "Two owners",
+    status: "PAUSED",
+    client_id: null,
+    tags: [...ownerTag("bcp"), ...ownerTag("parlay")],
+  },
+  { id: 65, name: "Vasco Signal", status: "PAUSED", client_id: null, tags: ownerTag("vasco") },
+];
+
+describe("ChecksService with sg-owner tags (client_id null)", () => {
+  it("paused sweep: a tagged campaign is a client campaign; untagged / ambiguous stay no-client", async () => {
+    const { sl, service } = buildTagged(taggedPaused);
+    const report = await service.runPausedSweep({ now: NOW });
+    assert.deepEqual(report.wouldStart.map((r) => r.id), [61]);
+    assert.equal(report.wouldStart[0]?.client, "Roofs by Peterson");
+    assert.equal(report.noClientPaused, 2); // 63 untagged, 64 ambiguous
+    assert.ok(report.skipped.some((r) => r.id === 62 && r.reason === "inactive client"));
+    assert.ok(report.skipped.some((r) => r.id === 65 && r.reason === "excluded client"));
+    assert.equal(sl.calls.length, 0);
+  });
+
+  it("paused sweep live: STARTs only the tagged active-owner campaign", async () => {
+    const { sl, service } = buildTagged(taggedPaused, { PAUSED_SWEEP_MODE: "live" });
+    const report = await service.runPausedSweep({ now: NOW });
+    assert.deepEqual(sl.calls, [{ id: 61, status: "START" }]);
+    assert.equal(report.started[0]?.client, "Roofs by Peterson");
+  });
+
+  it("leads + signature checks include tagged ACTIVE campaigns and drop untagged / ciotola", async () => {
+    const active: SmartleadCampaign[] = [
+      { id: 71, name: "BCP Lane", status: "ACTIVE", client_id: null, tags: ownerTag("bcp") },
+      { id: 72, name: "Ciotola Lane", status: "ACTIVE", client_id: null, tags: ownerTag("ciotola") },
+      { id: 73, name: "Untagged Lane", status: "ACTIVE", client_id: null },
+      { id: 74, name: "Ambiguous Lane", status: "ACTIVE", client_id: null, tags: [...ownerTag("bcp"), ...ownerTag("emcor")] },
+    ];
+    const { sl, service } = buildTagged(active);
+    sl.getCampaignAnalytics = async () => ({
+      campaign_lead_stats: { total: 100, notStarted: 0, inprogress: 5 },
+    });
+    sl.getCampaignStatisticsPage = (async (_id: number, q: { limit: number }) =>
+      q.limit === 1
+        ? { total_stats: 30, data: [] }
+        : { total_stats: 1, data: [{ sent_time: "2026-10-27T15:00:00Z", email_message: DOUBLE_SIG }] }) as never;
+    const report = await service.runLeadsCheck({ now: NOW });
+    assert.equal(report.activeClientCampaigns, 1);
+    assert.deepEqual(report.flagged.map((r) => [r.id, r.kind, r.clientName]), [[71, "dry", "Bolder Cyber Partners"]]);
+    assert.equal(report.signatureCampaignsSampled, 1);
+    assert.deepEqual(report.doubleSignatures.map((r) => [r.id, r.clientName]), [[71, "Bolder Cyber Partners"]]);
+  });
+});
+
+describe("ChecksService meeting drought with sg-owner tags", () => {
+  it("groups ACTIVE tagged campaigns under their legacy client id, not Unknown", async () => {
+    const active: SmartleadCampaign[] = [
+      { id: 81, name: "Parlay A", status: "ACTIVE", client_id: null, tags: ownerTag("parlay") },
+      { id: 82, name: "Parlay B", status: "ACTIVE", client_id: null, tags: ownerTag("parlay") },
+      { id: 83, name: "Insight A", status: "ACTIVE", client_id: null, tags: ownerTag("insight") },
+      { id: 84, name: "Untagged", status: "ACTIVE", client_id: null },
+    ];
+    const sl = fakeSmartlead(active);
+    sl.listClients = async () => [];
+    const supabase = {
+      enabled: () => true,
+      fetchCampaignNames: async () => new Map(),
+      fetchClientRegistry: async () => new Map(),
+      fetchBookings: async () => [
+        { client_slug: "parlay", created_at: "2026-10-27T15:00:00Z", lead_email: "a@b.co" },
+      ],
+    };
+    const service = new ChecksService(
+      makeConfig(),
+      sl as never,
+      fakeSlack as never,
+      supabase as never,
+      new ChecksStore(path.join(tmpdir(), `checks-test-${Math.random()}.json`)),
+    );
+    const report = await service.runMeetingDrought({ now: NOW });
+    assert.equal(report.clientsChecked, 1);
+    assert.deepEqual(report.clients.map((c) => [c.client, c.meetingsInWindow]), [["Parlay Tech", 1]]);
+    assert.deepEqual(report.uncovered, ["Insight"]);
+  });
+});

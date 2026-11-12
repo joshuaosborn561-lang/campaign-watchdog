@@ -512,6 +512,7 @@ export class WatchService {
         name: campaign.name,
         status: campaign.status,
         clientId: resolved.clientId,
+        clientInactive: resolved.inactive === true,
         pausedReason: pausedReasonFrom(campaign),
         lastAutobounceAlertAt: this.state.snapshot(campaign.id).lastAutobounceAlertAt,
         fromActivityLog: fromLogs.has(campaign.id),

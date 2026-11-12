@@ -1,5 +1,6 @@
 import { apiRequest, sleep } from "../lib/http.js";
 import { asRecordArray, asNumber, pickString, unwrap } from "../lib/parse.js";
+import { catalogClientRecords, mergeClientRecords } from "../lib/owners.js";
 
 const BASE_URL = "https://server.smartlead.ai/api/v1/";
 
@@ -46,8 +47,19 @@ export interface SmartleadCampaign {
   name: string;
   status: string;
   client_id?: number | null;
+  /** Campaign tags (only returned with `include_tags=true`). Ownership = `sg-owner:<slug>`. */
+  tags?: SmartleadTag[];
   [key: string]: unknown;
 }
+
+export interface SmartleadTag {
+  tag_id?: number;
+  tag_name: string;
+  tag_color?: string | null;
+}
+
+/** Every campaign list / get call asks for tags: ownership lives only in sg-owner tags. */
+export const INCLUDE_TAGS_QUERY = { include_tags: true } as const;
 
 export interface SmartleadClientRecord {
   id: number;
@@ -73,18 +85,35 @@ export class SmartleadClient {
   constructor(private readonly apiKey: string) {}
 
   async listCampaigns(): Promise<SmartleadCampaign[]> {
-    const raw = await apiRequest<unknown>(BASE_URL, this.apiKey, "campaigns/");
+    const raw = await apiRequest<unknown>(BASE_URL, this.apiKey, "campaigns/", {
+      query: INCLUDE_TAGS_QUERY,
+    });
     return asRecordArray(raw)
       .map(normalizeCampaign)
       .filter((row): row is SmartleadCampaign => row != null);
   }
 
-  listClients(): Promise<SmartleadClientRecord[]> {
-    return apiRequest<SmartleadClientRecord[]>(BASE_URL, this.apiKey, "client/");
+  /**
+   * Client directory. Smartlead spaces are deleted (`GET /client` returns []),
+   * so this serves the owner catalog. The live call is kept only as an
+   * optional merge in case it ever returns rows again; its failure is ignored.
+   */
+  async listClients(): Promise<SmartleadClientRecord[]> {
+    const live = await apiRequest<unknown>(BASE_URL, this.apiKey, "client/").catch(() => []);
+    const liveRows = asRecordArray(live)
+      .map((row) => ({
+        id: asNumber(row.id) ?? NaN,
+        name: pickString(row, ["name"]),
+        logo: pickString(row, ["logo"]) ?? null,
+      }))
+      .filter((row) => Number.isFinite(row.id));
+    return mergeClientRecords(catalogClientRecords(), liveRows);
   }
 
   getCampaign(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}`);
+    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}`, {
+      query: INCLUDE_TAGS_QUERY,
+    });
   }
 
   getCampaignSettings(campaignId: number): Promise<unknown> {
@@ -196,7 +225,28 @@ function normalizeCampaign(row: Record<string, unknown>): SmartleadCampaign | nu
       asNumber(root.clientId) ??
       asNumber(unwrap(root.client)?.id) ??
       null,
+    tags: normalizeTags(root.tags),
   };
+}
+
+export function normalizeTags(raw: unknown): SmartleadTag[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SmartleadTag[] = [];
+  for (const tag of raw) {
+    if (typeof tag === "string") {
+      if (tag.trim()) out.push({ tag_name: tag.trim() });
+      continue;
+    }
+    const row = unwrap(tag);
+    const name = row ? pickString(row, ["tag_name", "name"]) : undefined;
+    if (!row || !name) continue;
+    out.push({
+      tag_id: asNumber(row.tag_id ?? row.id),
+      tag_name: name,
+      tag_color: pickString(row, ["tag_color", "color"]) ?? null,
+    });
+  }
+  return out;
 }
 
 export { sleep };

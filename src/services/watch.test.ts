@@ -1463,3 +1463,105 @@ describe("WatchService HeyReach runway", () => {
     );
   });
 });
+
+describe("WatchService with sg-owner tags (Smartlead spaces deleted, client_id null)", () => {
+  const remaining = {
+    total_count: "2000",
+    campaign_lead_stats: { total: 2000, notStarted: 800, inprogress: 200 },
+  };
+  const ownerTag = (slug: string) => [{ tag_id: 1, tag_name: `sg-owner:${slug}`, tag_color: null }];
+  const tue10 = new Date("2026-11-10T16:05:00.000Z"); // Tue 10:05am CT
+
+  it("auto-resumes a tagged bounce hold with client_id null and an empty /client", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        campaign({
+          id: 501,
+          name: "BCP Displacement Hold",
+          status: "PAUSED",
+          client_id: null,
+          tags: ownerTag("bcp"),
+          paused_reason: "bounce protection",
+        }),
+      ],
+      clients: [],
+      analyticsByDate: { 501: { data: [{ date: "2026-11-10", sent_count: 0 }] } },
+      analytics: { 501: remaining },
+    });
+    await withService(smartlead, slack, fakeSupabase(), async (watch) => {
+      const result = await watch.runPulse(tue10);
+      assert.equal(result.unpaused, 1);
+      assert.deepEqual(smartlead.started, [{ id: 501, status: "START" }]);
+    });
+  });
+
+  it("does not auto-resume ciotola, untagged, or ambiguous holds; a stale Supabase id does not rescue them", async () => {
+    const slack = fakeSlack();
+    const hold = (id: number, name: string, tags: SmartleadCampaign["tags"]) =>
+      campaign({ id, name, status: "PAUSED", client_id: null, tags, paused_reason: "bounce protection" });
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        hold(511, "Ciotola Lane", ownerTag("ciotola")),
+        hold(512, "Untagged leftover", []),
+        hold(513, "Two owners", [...ownerTag("bcp"), ...ownerTag("parlay")]),
+      ],
+      clients: [],
+      analyticsByDate: {
+        511: { data: [{ date: "2026-11-10", sent_count: 0 }] },
+        512: { data: [{ date: "2026-11-10", sent_count: 0 }] },
+        513: { data: [{ date: "2026-11-10", sent_count: 0 }] },
+      },
+      analytics: { 511: remaining, 512: remaining, 513: remaining },
+    });
+    await withService(
+      smartlead,
+      slack,
+      fakeSupabase({
+        campaigns: new Map([
+          // Ciotola used to live in the SalesGlider space.
+          [511, { smartlead_campaign_id: 511, name: "Ciotola Lane", client_name: "SalesGlider", smartlead_client_id: 345263 }],
+          [513, { smartlead_campaign_id: 513, name: "Two owners", client_name: "Bolder Cyber Partners", smartlead_client_id: BCP }],
+        ]),
+      }),
+      async (watch) => {
+        const result = await watch.runPulse(tue10);
+        assert.equal(result.unpaused, 0);
+        assert.deepEqual(smartlead.started, []);
+      },
+    );
+  });
+
+  it("pulse groups tagged campaigns by owner, the tag beating a stale Supabase id", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          campaign({ id: 521, name: "BCP Lane A", client_id: null, tags: ownerTag("bcp") }),
+          campaign({ id: 522, name: "BCP Lane B", client_id: null, tags: ownerTag("bcp") }),
+          campaign({ id: 523, name: "Goliath Lane", client_id: null, tags: ownerTag("goliath") }),
+        ],
+        clients: [],
+        analyticsByDate: {
+          521: { data: [{ date: "2026-11-10", sent_count: 300, bounce_count: 0 }] },
+          522: { data: [{ date: "2026-11-10", sent_count: 100, bounce_count: 0 }] },
+          523: { data: [{ date: "2026-11-10", sent_count: 50, bounce_count: 0 }] },
+        },
+      }),
+      slack,
+      fakeSupabase({
+        campaigns: new Map([
+          [523, { smartlead_campaign_id: 523, name: "Goliath Lane", client_name: "Bolder Cyber Partners", smartlead_client_id: BCP }],
+        ]),
+      }),
+      async (watch) => {
+        const result = await watch.runPulse(tue10);
+        assert.equal(result.posted, true);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*Bolder Cyber Partners\* — 400 sent/);
+        assert.match(text, /\*Goliath Cybersecurity\* — 50 sent/);
+        assert.doesNotMatch(text, /Unknown client/);
+      },
+    );
+  });
+});

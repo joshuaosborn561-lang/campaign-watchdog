@@ -1,4 +1,5 @@
 import { SmartleadClient } from "../src/clients/smartlead.js";
+import { resolveClient } from "../src/lib/clients.js";
 import { isNoiseCampaign } from "../src/lib/names.js";
 import { classifyInboxes } from "../src/lib/inboxes.js";
 import { parseCampaignLeadStats } from "../src/lib/completion.js";
@@ -29,7 +30,10 @@ const smartlead = new SmartleadClient(apiKey);
 
 const campaigns = await smartlead.listCampaigns();
 const clients = await smartlead.listClients().catch(() => []);
-const clientName = new Map(clients.map((c) => [c.id, c.logo?.trim() || c.name || `Client ${c.id}`]));
+const clientsById = new Map(clients.map((c) => [c.id, c]));
+// Same resolver as the service: sg-owner tag (row or detail) → owner catalog, then client_id.
+const ownerName = (campaign: (typeof campaigns)[number], detail?: unknown) =>
+  resolveClient(campaign, clientsById, new Map(), new Map(), detail).clientName;
 
 type Row = {
   client: string;
@@ -91,9 +95,7 @@ for (const campaign of campaigns) {
       messagePerDay: 30,
     });
     rows.push({
-      client:
-        (campaign.client_id && clientName.get(campaign.client_id)) ||
-        "Unknown client",
+      client: ownerName(campaign, detail),
       name: campaign.name,
       status,
       sent,
@@ -111,7 +113,7 @@ for (const campaign of campaigns) {
     });
   } catch (error) {
     rows.push({
-      client: (campaign.client_id && clientName.get(campaign.client_id)) || "Unknown client",
+      client: ownerName(campaign),
       name: campaign.name,
       status,
       sent: -1,

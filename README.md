@@ -62,7 +62,7 @@ The 2-hour pulse's own `AUTO_RESUME_BOUNCE_HOLDS` (bounce-protection holds only)
 
 **Skip (pulse/midday/EOD):** canary / word-hunt / pod-control shells and the pulse-exclude leftovers (Nieto / MSRS / Positive). Clients with no ACTIVE send-day campaigns are omitted from midday/EOD volume lines.
 
-Client names come from Smartlead `client_id` first (`/client/` + `_meta.client_registry`). Sent totals are that campaign's analytics-by-date for the Chicago day — never lifetime.
+Client owner comes from the campaign's unique `sg-owner:<slug>` tag first (Smartlead client spaces were deleted 2026-11-11, so `client_id` is null and `/client/` is empty; campaigns are read with `include_tags=true`). The slug maps to its legacy client id and name in `src/lib/owners.ts`; the `_meta.client_registry` name still wins for that id. Two different sg-owner tags = unowned. Without a tag: Smartlead `client_id`, then campaignintelligence `smartlead_client_id`, then its `client_name`, else Unknown client. Inactive owners (ciotola) are named but never auto-resumed or swept. Sent totals are that campaign's analytics-by-date for the Chicago day — never lifetime.
 
 ## Env
 

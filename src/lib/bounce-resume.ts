@@ -16,6 +16,8 @@ export interface BounceResumeCandidate {
   name: string;
   status?: string;
   clientId: number | null;
+  /** Owner is inactive in the owner catalog (e.g. ciotola): never auto-resume. */
+  clientInactive?: boolean;
   pausedReason?: string | null;
   lastAutobounceAlertAt?: string;
   fromActivityLog?: boolean;
@@ -91,6 +93,7 @@ export function bounceResumeSkipReason(
   if (!isBounceHold(candidate)) return "not a bounce hold";
   if (isNoiseCampaign(candidate.name)) return "noise";
   if (new Set(rules.excludeIds).has(candidate.id)) return "excluded id";
+  if (candidate.clientInactive) return "inactive client";
   if (candidate.clientId == null) return "no client";
   const goliathId = rules.goliathClientId ?? GOLIATH_BOUNCE_RESUME_CLIENT_ID;
   const holdThrough = rules.goliathHoldThrough ?? GOLIATH_BOUNCE_RESUME_HOLD_THROUGH;
