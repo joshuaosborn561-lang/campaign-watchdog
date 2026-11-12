@@ -1,4 +1,4 @@
-import { apiRequest, sleep } from "../lib/http.js";
+import { apiRequest, sleep, type RequestOptions } from "../lib/http.js";
 import { asRecordArray, asNumber, pickString, unwrap } from "../lib/parse.js";
 import { catalogClientRecords, mergeClientRecords } from "../lib/owners.js";
 
@@ -81,11 +81,95 @@ export interface SmartleadEmailAccount {
   time_to_wait_in_mins?: number;
 }
 
+/** Default spacing between Smartlead calls: 500ms ≈ 120/min of the shared 200/min key. */
+export const DEFAULT_SMARTLEAD_MIN_INTERVAL_MS = 500;
+
+/** Retries per Smartlead call; each 429 waits out Retry-After (≤ ~65s). */
+export const SMARTLEAD_RETRIES = 6;
+
+export function smartleadMinIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.SMARTLEAD_MIN_INTERVAL_MS?.trim();
+  if (!raw) return DEFAULT_SMARTLEAD_MIN_INTERVAL_MS;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_SMARTLEAD_MIN_INTERVAL_MS;
+}
+
+/**
+ * Process-wide gate: every Smartlead call (all SmartleadClient instances)
+ * starts at least SMARTLEAD_MIN_INTERVAL_MS after the previous one started.
+ * One master key serves every SalesGlider tool and Smartlead caps the whole
+ * account at 200 requests/min, so Watchdog must leave headroom.
+ */
+let nextSmartleadSlotAt = 0;
+export async function throttleSmartlead(nowMs: () => number = Date.now): Promise<void> {
+  const interval = smartleadMinIntervalMs();
+  if (interval <= 0) return;
+  const now = nowMs();
+  const slot = Math.max(now, nextSmartleadSlotAt);
+  nextSmartleadSlotAt = slot + interval;
+  if (slot > now) await sleep(slot - now);
+}
+
+/** Test hook: forget the last reserved slot. */
+export function resetSmartleadThrottle(): void {
+  nextSmartleadSlotAt = 0;
+}
+
+/** Smartlead statuses whose sends count toward "sent today" (everything but drafts). */
+export function isCountableCampaignStatus(status: unknown): boolean {
+  const normalized = String(status ?? "").trim().toUpperCase();
+  return normalized !== "" && normalized !== "DRAFTED" && normalized !== "DRAFT";
+}
+
+/** Smartlead: "Maximum 100 campaign IDs are allowed". */
+export const MAX_DAY_WISE_CAMPAIGN_IDS = 100;
+
+export interface DayWiseTotals {
+  sent: number;
+  bounced: number;
+}
+
 export class SmartleadClient {
   constructor(private readonly apiKey: string) {}
 
+  private async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    await throttleSmartlead();
+    return apiRequest<T>(BASE_URL, this.apiKey, path, {
+      retries: SMARTLEAD_RETRIES,
+      ...options,
+    });
+  }
+
+  /**
+   * Sent / bounced on `day` (YYYY-MM-DD) summed over `campaignIds`, in ONE
+   * call (`GET analytics/day-wise-overall-stats`). Throws on an unexpected
+   * shape — callers must never read a failure as 0 sent.
+   */
+  async getDayWiseTotals(day: string, campaignIds: number[]): Promise<DayWiseTotals> {
+    if (!campaignIds.length) return { sent: 0, bounced: 0 };
+    if (campaignIds.length > MAX_DAY_WISE_CAMPAIGN_IDS) {
+      throw new Error(`day-wise-overall-stats: at most ${MAX_DAY_WISE_CAMPAIGN_IDS} campaign ids per call`);
+    }
+    const raw = await this.request<unknown>("analytics/day-wise-overall-stats", {
+      query: { start_date: day, end_date: day, campaign_ids: campaignIds.join(",") },
+    });
+    const parsed = parseDayWiseTotals(raw);
+    if (!parsed) throw new Error("day-wise-overall-stats: unexpected response shape");
+    return parsed;
+  }
+
+  /** Whole-account sent / bounced on `day` (no campaign filter). Cross-checks only. */
+  async getAccountDayWiseTotals(day: string): Promise<DayWiseTotals> {
+    const raw = await this.request<unknown>("analytics/day-wise-overall-stats", {
+      query: { start_date: day, end_date: day },
+    });
+    const parsed = parseDayWiseTotals(raw);
+    if (!parsed) throw new Error("day-wise-overall-stats: unexpected response shape");
+    return parsed;
+  }
+
   async listCampaigns(): Promise<SmartleadCampaign[]> {
-    const raw = await apiRequest<unknown>(BASE_URL, this.apiKey, "campaigns/", {
+    const raw = await this.request<unknown>("campaigns/", {
       query: INCLUDE_TAGS_QUERY,
     });
     return asRecordArray(raw)
@@ -99,7 +183,7 @@ export class SmartleadClient {
    * optional merge in case it ever returns rows again; its failure is ignored.
    */
   async listClients(): Promise<SmartleadClientRecord[]> {
-    const live = await apiRequest<unknown>(BASE_URL, this.apiKey, "client/").catch(() => []);
+    const live = await this.request<unknown>("client/").catch(() => []);
     const liveRows = asRecordArray(live)
       .map((row) => ({
         id: asNumber(row.id) ?? NaN,
@@ -111,21 +195,21 @@ export class SmartleadClient {
   }
 
   getCampaign(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}`, {
+    return this.request(`campaigns/${campaignId}`, {
       query: INCLUDE_TAGS_QUERY,
     });
   }
 
   getCampaignSettings(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/settings`);
+    return this.request(`campaigns/${campaignId}/settings`);
   }
 
   getCampaignAnalytics(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/analytics`);
+    return this.request(`campaigns/${campaignId}/analytics`);
   }
 
   getCampaignStatistics(campaignId: number): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/statistics`);
+    return this.request(`campaigns/${campaignId}/statistics`);
   }
 
   /** Paged sent-email statistics. `total_stats` is the count; `data[].email_message` is the sent body. */
@@ -139,7 +223,7 @@ export class SmartleadClient {
       sentEndDate?: string;
     },
   ): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/statistics`, {
+    return this.request(`campaigns/${campaignId}/statistics`, {
       query: {
         offset: query.offset ?? 0,
         limit: query.limit,
@@ -155,7 +239,7 @@ export class SmartleadClient {
     startDate: string,
     endDate: string,
   ): Promise<unknown> {
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/analytics-by-date`, {
+    return this.request(`campaigns/${campaignId}/analytics-by-date`, {
       query: { start_date: startDate, end_date: endDate },
     });
   }
@@ -165,17 +249,14 @@ export class SmartleadClient {
     status: SmartleadCampaignStatusWrite,
   ): Promise<unknown> {
     const allowed = assertAllowedCampaignStatus(campaignId, status);
-    return apiRequest(BASE_URL, this.apiKey, `campaigns/${campaignId}/status`, {
+    return this.request(`campaigns/${campaignId}/status`, {
       method: "POST",
       body: { status: allowed },
     });
   }
 
   async getCampaignEmailAccounts(campaignId: number): Promise<SmartleadEmailAccount[]> {
-    const raw = await apiRequest<unknown>(
-      BASE_URL,
-      this.apiKey,
-      `campaigns/${campaignId}/email-accounts`,
+    const raw = await this.request<unknown>(`campaigns/${campaignId}/email-accounts`,
     );
     return asRecordArray(raw).map((row) => ({
       id: asNumber(row.id) ?? 0,
@@ -250,3 +331,31 @@ export function normalizeTags(raw: unknown): SmartleadTag[] {
 }
 
 export { sleep };
+
+/**
+ * `{ success, data: { day_wise_stats: [{ date, email_engagement_metrics: { sent, bounced } }] } }`
+ * → summed sent/bounced. `null` when the shape is not recognised.
+ */
+export function parseDayWiseTotals(raw: unknown): DayWiseTotals | null {
+  if (!raw || typeof raw !== "object") return null;
+  const root = raw as { success?: unknown; data?: unknown };
+  if (root.success === false) return null;
+  const data = root.data && typeof root.data === "object" ? (root.data as Record<string, unknown>) : null;
+  const days = data?.day_wise_stats;
+  if (!Array.isArray(days)) return null;
+  let sent = 0;
+  let bounced = 0;
+  for (const day of days) {
+    const metrics =
+      day && typeof day === "object"
+        ? (day as { email_engagement_metrics?: unknown }).email_engagement_metrics
+        : null;
+    if (!metrics || typeof metrics !== "object") return null;
+    const m = metrics as Record<string, unknown>;
+    const daySent = asNumber(m.sent);
+    if (daySent == null) return null;
+    sent += Math.max(0, daySent);
+    bounced += Math.max(0, asNumber(m.bounced) ?? 0);
+  }
+  return { sent, bounced };
+}

@@ -74,7 +74,7 @@ See `.env.example`. Minimum:
 - `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (client names + alert dedupe)
 - Optional HeyReach workspace keys: `HEYREACH_SALESGLIDER_API_KEY`, `HEYREACH_TECHEVO_API_KEY`
 
-Optional: `PULSE_CRON` (default `5 8,10,12,14,16 * * 1-5`, **live again**), `VOLUME_CRON`, `EOD_CRON`, `VOLUME_TARGET_SENDS` (default 1200), `VOLUME_ALERT_MAX` (default 1080), `AUTO_RESUME_BOUNCE_HOLDS` (default on), `BOUNCE_RESUME_EXCLUDE_IDS`. Pulse @-mentions stay off unless `SLACK_MENTION_UNDER=1`; ids are `SLACK_CAYDEN_USER_ID` (default `U0BL8JT75KN`) and `SLACK_JOSH_USER_ID` (default `U0AAX2XFJE7`). Safe to leave unset on Railway.
+Optional: `PULSE_CRON` (default `5 8,10,12,14,16 * * 1-5`, **live again**), `VOLUME_CRON`, `EOD_CRON`, `VOLUME_TARGET_SENDS` (default 1200; pulse/midday *under* = projected < 90% of it, and the "pace short of N" text uses it), `VOLUME_ALERT_MAX` (EOD, default 1080), `SMARTLEAD_MIN_INTERVAL_MS` (default 500 ≈ 120 Smartlead calls/min, leaving headroom on the shared 200/min key), `AUTO_RESUME_BOUNCE_HOLDS` (default on), `BOUNCE_RESUME_EXCLUDE_IDS`. Pulse @-mentions stay off unless `SLACK_MENTION_UNDER=1`; ids are `SLACK_CAYDEN_USER_ID` (default `U0BL8JT75KN`) and `SLACK_JOSH_USER_ID` (default `U0AAX2XFJE7`). Safe to leave unset on Railway.
 
 Mount a volume at `/data` so `STATE_FILE_PATH=/data/watchdog-state.json` survives restarts.
 
@@ -85,3 +85,8 @@ Mount a volume at `/data` so `STATE_FILE_PATH=/data/watchdog-state.json` survive
 - `POST /pulse` — same token; no-ops outside weekday 8am–4pm pulse slots (plus grace)
 - `POST /midday` — same token; no-ops outside the weekday noon window
 - `POST /eod` — same token; no-ops outside the weekday 5–6pm window
+
+## Sent-today counts (pulse, midday, EOD)
+
+One `GET analytics/day-wise-overall-stats?start_date=D&end_date=D&campaign_ids=…` call per client (≤100 ids per call) over every non-draft campaign the sg-owner resolver assigns to that client — ACTIVE, PAUSED, COMPLETED and STOPPED — so lists that finish or pause mid-day still count. If a client's call fails, Watchdog falls back to per-campaign `analytics-by-date`; any campaign still unread is logged and the line renders `≥N sent (incomplete: k campaigns unread)`, never 0. 429s honor `Retry-After` / `X-RateLimit-Reset` (≤65s per wait, 6 retries). Read-only check: `npx tsx scripts/pulse-today.ts [--recount=salesglider,parlay]`.
+

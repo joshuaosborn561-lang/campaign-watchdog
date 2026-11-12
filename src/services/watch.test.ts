@@ -9,6 +9,7 @@ import type { CampaignNameRow } from "../clients/supabase.js";
 import { resolveClientName } from "./watch.js";
 import { WatchService } from "./watch.js";
 import { StateStore } from "../state/store.js";
+import { parseTodayVolume } from "../lib/pulse.js";
 
 const BCP = 542838;
 
@@ -26,6 +27,8 @@ function fakeSmartlead(options: {
   campaigns: SmartleadCampaign[];
   clients?: SmartleadClientRecord[];
   analyticsByDate?: Record<number, unknown>;
+  /** Omit the one-call day-wise endpoint (forces the per-campaign fallback). */
+  noDayWise?: boolean;
   analytics?: Record<number, unknown>;
   detail?: Record<number, unknown>;
   settings?: Record<number, unknown>;
@@ -48,7 +51,21 @@ function fakeSmartlead(options: {
     is_imap_success: true,
     daily_sent_count: 0,
   }));
+  const dayWiseCalls: number[][] = [];
+  const getDayWiseTotals = async (day: string, ids: number[]) => {
+    dayWiseCalls.push([...ids]);
+    let sent = 0;
+    let bounced = 0;
+    for (const id of ids) {
+      const volume = parseTodayVolume(options.analyticsByDate?.[id] ?? null, day);
+      sent += volume.sent;
+      bounced += volume.bounced;
+    }
+    return { sent, bounced };
+  };
   return {
+    ...(options.noDayWise ? {} : { getDayWiseTotals }),
+    dayWiseCalls,
     listCampaigns: async () => options.campaigns,
     listClients: async () => options.clients ?? [],
     getCampaign: async (id: number) => options.detail?.[id] ?? options.campaigns.find((row) => row.id === id),
@@ -247,10 +264,11 @@ describe("WatchService Slack — pulse / midday / autobounce / EOD", () => {
         assert.equal(result.clients, 2);
         const text = slack.posted[0] ?? "";
         assert.match(text, /\*Midday — Tue 9\/1 12:00pm\*/);
-        // 9–18 at noon is ×3: 400→1,200 on track; 200→600 under
+        // 9–18 at noon is ×3. BCP's PAUSED list's 50 sends today now count
+        // (one day-wise call over all non-draft lists): 450→1,350 on track; 200→600 under
         assert.match(
           text,
-          /• \*Bolder Cyber Partners\* `#542838` — 400 sent → 1,200 proj · on track/,
+          /• \*Bolder Cyber Partners\* `#542838` — 450 sent → 1,350 proj · on track/,
         );
         assert.match(
           text,
@@ -1561,6 +1579,126 @@ describe("WatchService with sg-owner tags (Smartlead spaces deleted, client_id n
         assert.match(text, /\*Bolder Cyber Partners\* — 400 sent/);
         assert.match(text, /\*Goliath Cybersecurity\* — 50 sent/);
         assert.doesNotMatch(text, /Unknown client/);
+      },
+    );
+  });
+});
+
+describe("WatchService sent-today accuracy (one day-wise call per client)", () => {
+  const tagged = (
+    id: number,
+    name: string,
+    status: string,
+    owner: string,
+  ): SmartleadCampaign => campaign({ id, name, status, tags: [{ tag_name: `sg-owner:${owner}` }] });
+  const day = (sent: number, bounced = 0) => ({
+    data: [{ date: "2026-09-01", sent_count: sent, bounce_count: bounced }],
+  });
+
+  it("pulse counts ACTIVE, PAUSED, COMPLETED and STOPPED lists in one call per client, never DRAFTED", async () => {
+    const slack = fakeSlack();
+    const smartlead = fakeSmartlead({
+      campaigns: [
+        tagged(1, "Parlay A", "ACTIVE", "parlay"),
+        tagged(2, "Parlay B", "PAUSED", "parlay"),
+        tagged(3, "Parlay C", "COMPLETED", "parlay"),
+        tagged(4, "Parlay D", "STOPPED", "parlay"),
+        tagged(5, "Parlay E", "DRAFTED", "parlay"),
+      ],
+      analyticsByDate: { 1: day(300, 3), 2: day(100), 3: day(150), 4: day(67), 5: day(999) },
+    });
+    await withService(smartlead, slack, fakeSupabase(), async (watch) => {
+      const result = await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+      assert.equal(result.posted, true);
+      assert.deepEqual(smartlead.dayWiseCalls.map((ids) => [...ids].sort()), [[1, 2, 3, 4]]);
+      const text = slack.posted[0] ?? "";
+      assert.match(text, /\*Parlay[^*]*\* — 617 sent/);
+      assert.doesNotMatch(text, /incomplete/);
+      assert.doesNotMatch(text, /Unknown client/);
+    });
+  });
+
+  it("pulse renders ≥N (incomplete) instead of 0 when reads fail", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        noDayWise: true,
+        campaigns: [
+          tagged(4287124, "SG GC Tickets", "ACTIVE", "salesglider"),
+          tagged(2, "SG Subs", "ACTIVE", "salesglider"),
+        ],
+        // #4287124 has no by-date row → the fake throws (like a 429 that never clears).
+        analyticsByDate: { 2: day(273) },
+      }),
+      slack,
+      fakeSupabase(),
+      async (watch) => {
+        await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /≥273 sent \(incomplete: 1 campaign unread\)/);
+        assert.match(text, /Total ≥273 sent \(incomplete: 1 campaign unread\)/);
+      },
+    );
+  });
+
+  it("does not list a churned client with only STOPPED lists and no sends today", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          tagged(1, "Parlay A", "ACTIVE", "parlay"),
+          tagged(9, "Old list", "STOPPED", "vasco"),
+        ],
+        analyticsByDate: { 1: day(10) },
+      }),
+      slack,
+      fakeSupabase(),
+      async (watch) => {
+        await watch.runPulse(new Date("2026-09-01T15:05:00.000Z"));
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*Parlay[^*]*\* — 10 sent/);
+        assert.doesNotMatch(text, /Vasco/i);
+      },
+    );
+  });
+
+  it("midday uses VOLUME_TARGET_SENDS for *under* and the pace text", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [tagged(1, "Parlay A", "ACTIVE", "parlay"), tagged(2, "Peterson A", "ACTIVE", "peterson")],
+        // 9–18 window at noon is ×3: 200→600 (on track at 600 target), 100→300 (under).
+        analyticsByDate: { 1: day(200), 2: day(100) },
+      }),
+      slack,
+      fakeSupabase(),
+      async (watch) => {
+        await watch.runVolumeCheck(noonTue);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*Parlay[^*]*\*.* — 200 sent → 600 proj · on track/);
+        assert.match(text, /\*[^*]*Peterson\*.* — 100 sent → 300 proj · \*under\* — pace short of 600/);
+      },
+      [],
+      { VOLUME_TARGET_SENDS: "600" },
+    );
+  });
+
+  it("EOD counts a list that went PAUSED mid-day", async () => {
+    const slack = fakeSlack();
+    await withService(
+      fakeSmartlead({
+        campaigns: [
+          tagged(1, "Parlay A", "ACTIVE", "parlay"),
+          tagged(2, "Parlay B", "PAUSED", "parlay"),
+        ],
+        analyticsByDate: { 1: day(700), 2: day(500) },
+      }),
+      slack,
+      fakeSupabase(),
+      async (watch) => {
+        await watch.runEndOfDay(eodTue);
+        const text = slack.posted[0] ?? "";
+        assert.match(text, /\*Parlay[^*]*\*.* — 1,200 \/ 1,200$/m);
       },
     );
   });

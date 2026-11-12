@@ -3,6 +3,7 @@ import { isNoiseCampaign } from "./names.js";
 import { isPulseExcludedCampaign, type PulseExclude } from "./pulse.js";
 import { type CampaignSchedule } from "./schedule.js";
 import { explainUnderVolume, formatUnderFlag } from "./under-reason.js";
+import { formatSentCount } from "./pulse.js";
 import {
   clockMinutesInZone,
   hourInZone,
@@ -67,6 +68,8 @@ export interface ClientVolumeRow {
   needsTopUp: boolean;
   /** ACTIVE lists whose remaining / 1,200-send days is under EMAIL_RUNWAY_DAYS. */
   lowLeadCampaigns: number;
+  /** Campaigns whose sent-today read failed; `sent` is then a floor. */
+  unread?: number;
   fraction: number;
   startMinutes: number;
   endMinutes: number;
@@ -144,6 +147,17 @@ export function formatLowOnLeadsLines(
     .map((row) => `• *${row.clientName}* — ${row.lowLeadCampaigns} low on leads`);
 }
 
+/** Exact per-client sent today (one day-wise call per client), keyed by clientGroupKey. */
+export interface ClientSentTotal {
+  clientId: number | null;
+  clientName: string;
+  sent: number;
+  bounced: number;
+  unread?: number;
+}
+
+export type ClientSentTotals = Map<string, ClientSentTotal>;
+
 interface VolumeGroup {
   clientId: number | null;
   clientName: string;
@@ -158,6 +172,7 @@ interface VolumeGroup {
   bounceHold: boolean;
   caps: Array<number | null>;
   senders: Map<number, SenderLoad>;
+  unread: number;
 }
 
 function addVolumeGroupRow(
@@ -179,6 +194,7 @@ function addVolumeGroupRow(
     bounceHold: false,
     senders: new Map(),
     caps: [],
+    unread: 0,
   };
   current.sent += Math.max(0, row.sent);
   current.bounced += Math.max(0, row.bounced ?? 0);
@@ -199,6 +215,7 @@ function underSignalsFromGroup(
   remaining: number | null,
   outsideWindow: boolean,
   alertMax = VOLUME_ALERT_MAX,
+  target = VOLUME_TARGET_SENDS,
 ) {
   return {
     sent: group.sent,
@@ -213,6 +230,7 @@ function underSignalsFromGroup(
     maxLeadsPerDay: rollupDailyCap(group.caps),
     outsideWindow,
     alertMax,
+    target,
     ...senderSignals(group.senders),
   };
 }
@@ -319,16 +337,35 @@ export function unionClientWindow(
   return { start, end };
 }
 
+/**
+ * Replace per-campaign sent/bounced sums with the exact one-call-per-client
+ * totals (which also include PAUSED / COMPLETED / STOPPED lists).
+ */
+function applyClientTotals(groups: Map<string, VolumeGroup>, totals?: ClientSentTotals): void {
+  if (!totals) return;
+  for (const [key, group] of groups) {
+    const exact = totals.get(key);
+    if (!exact) continue;
+    group.sent = Math.max(0, exact.sent);
+    group.bounced = Math.max(0, exact.bounced);
+    group.unread = Math.max(0, exact.unread ?? 0);
+  }
+}
+
 export function rollupClientVolume(
   rows: VolumeCampaignInput[],
   now: Date,
   targetTimeZone: string,
   slotHour = VOLUME_SLOT_HOUR,
+  target = VOLUME_TARGET_SENDS,
+  totals?: ClientSentTotals,
 ): ClientVolumeRow[] {
   const groups = new Map<string, VolumeGroup>();
   for (const row of rows) {
     addVolumeGroupRow(groups, row);
   }
+  applyClientTotals(groups, totals);
+  const alertMax = volumeAlertMax(target);
 
   const slotMinutes = slotHour * 60;
   const out: ClientVolumeRow[] = [];
@@ -339,9 +376,9 @@ export function rollupClientVolume(
     if (fraction == null) continue;
     const projected = projectDayTotal(group.sent, fraction);
     const remaining = sumRemaining(group.remainings);
-    const daysLeft = emailDaysLeft(remaining);
-    const lowLeadCampaigns = countLowLeadCampaigns(group.remainings);
-    const under = projected < VOLUME_ALERT_MAX;
+    const daysLeft = emailDaysLeft(remaining, target);
+    const lowLeadCampaigns = countLowLeadCampaigns(group.remainings, target);
+    const under = projected < alertMax;
     const outsideWindow = slotMinutes < window.start || slotMinutes >= window.end;
     out.push({
       clientId: group.clientId,
@@ -351,8 +388,13 @@ export function rollupClientVolume(
       remaining,
       daysLeft,
       under,
-      ...underFields(under, underSignalsFromGroup(group, remaining, outsideWindow), lowLeadCampaigns),
+      ...underFields(
+        under,
+        underSignalsFromGroup(group, remaining, outsideWindow, alertMax, target),
+        lowLeadCampaigns,
+      ),
       lowLeadCampaigns,
+      ...(group.unread > 0 ? { unread: group.unread } : {}),
       fraction,
       startMinutes: window.start,
       endMinutes: window.end,
@@ -365,11 +407,13 @@ export function rollupClientEod(
   rows: VolumeCampaignInput[],
   target = VOLUME_TARGET_SENDS,
   alertMax = VOLUME_ALERT_MAX,
+  totals?: ClientSentTotals,
 ): ClientVolumeRow[] {
   const groups = new Map<string, VolumeGroup>();
   for (const row of rows) {
     addVolumeGroupRow(groups, row);
   }
+  applyClientTotals(groups, totals);
 
   const out: ClientVolumeRow[] = [];
   for (const group of groups.values()) {
@@ -387,10 +431,37 @@ export function rollupClientEod(
       under,
       ...underFields(
         under,
-        underSignalsFromGroup(group, remaining, false, alertMax),
+        underSignalsFromGroup(group, remaining, false, alertMax, target),
         lowLeadCampaigns,
       ),
       lowLeadCampaigns,
+      ...(group.unread > 0 ? { unread: group.unread } : {}),
+      fraction: 1,
+      startMinutes: 0,
+      endMinutes: 0,
+    });
+  }
+  // Clients with sends today but no ACTIVE list left (lists completed/stopped mid-day).
+  for (const [key, exact] of totals ?? []) {
+    if (groups.has(key)) continue;
+    const unread = Math.max(0, exact.unread ?? 0);
+    if (exact.sent <= 0 && unread <= 0) continue;
+    const under = exact.sent < alertMax;
+    out.push({
+      clientId: exact.clientId,
+      clientName: exact.clientName,
+      sent: Math.max(0, exact.sent),
+      projected: Math.max(0, exact.sent),
+      remaining: null,
+      daysLeft: null,
+      under,
+      ...underFields(
+        under,
+        { sent: exact.sent, bounced: exact.bounced, activeCampaigns: 0, alertMax, target },
+        0,
+      ),
+      lowLeadCampaigns: 0,
+      ...(unread > 0 ? { unread } : {}),
       fraction: 1,
       startMinutes: 0,
       endMinutes: 0,
@@ -468,7 +539,7 @@ export function formatMiddayReport(
     const proj = Math.round(row.projected).toLocaleString();
     const flag = row.under ? formatUnderFlag(true, row.underReason) : " · on track";
     lines.push(
-      `• ${formatClientLabel(row)} — ${row.sent.toLocaleString()} sent → ${proj} proj${flag}`,
+      `• ${formatClientLabel(row)} — ${formatSentCount(row.sent, row.unread)} → ${proj} proj${flag}`,
     );
   }
   return lines.join("\n");
@@ -483,7 +554,11 @@ export function formatEodReport(
   if (!rows.length) return null;
   const lines = [`*EOD — ${formatDayStamp(day)}*`];
   for (const row of sortVolumeRows(rows)) {
-    const bits = [`${row.sent.toLocaleString()} / ${target.toLocaleString()}`];
+    const bits = [
+      row.unread
+        ? `≥${row.sent.toLocaleString()} / ${target.toLocaleString()} (incomplete: ${row.unread} campaign${row.unread === 1 ? "" : "s"} unread)`
+        : `${row.sent.toLocaleString()} / ${target.toLocaleString()}`,
+    ];
     if (row.under) {
       lines.push(
         `• ${formatClientLabel(row)} — ${bits.join(" · ")}${formatUnderFlag(true, row.underReason)}`,

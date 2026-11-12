@@ -15,6 +15,17 @@ export interface ClientPulse {
   under?: boolean;
   /** One-sentence primary cause when `under`. */
   underReason?: string;
+  /** Campaigns whose sent-today read failed; `sent` is then a floor, never "0". */
+  unread?: number;
+}
+
+/** `≥1,082 sent (incomplete: 1 campaign unread)` or `1,082 sent`. */
+export function formatSentCount(sent: number, unread?: number | null): string {
+  const n = Math.max(0, sent).toLocaleString("en-US");
+  if (unread && unread > 0) {
+    return `≥${n} sent (incomplete: ${unread} campaign${unread === 1 ? "" : "s"} unread)`;
+  }
+  return `${n} sent`;
 }
 
 /** Cayden in #campaign-watchdog. Used only when SLACK_MENTION_UNDER is on. */
@@ -141,7 +152,13 @@ export function attachPulseUnder(
 }
 
 export function rollupClientPulse(
-  rows: Array<{ clientId?: number | null; clientName: string; sent: number; bounced: number }>,
+  rows: Array<{
+    clientId?: number | null;
+    clientName: string;
+    sent: number;
+    bounced: number;
+    unread?: number;
+  }>,
 ): ClientPulse[] {
   const groups = new Map<string, ClientPulse>();
   for (const row of rows) {
@@ -154,6 +171,8 @@ export function rollupClientPulse(
     };
     current.sent += Math.max(0, row.sent);
     current.bounced += Math.max(0, row.bounced);
+    const unread = Math.max(0, row.unread ?? 0);
+    if (unread > 0) current.unread = (current.unread ?? 0) + unread;
     groups.set(key, current);
   }
   return [...groups.values()].sort(
@@ -414,8 +433,9 @@ export function formatClientPulse(input: {
     lines.push(`*${row.clientName}* — ${formatClientLine(row, input.bounceWarn)}`);
   }
   const overall = bouncePercent(totalSent, totalBounced);
+  const totalUnread = input.clients.reduce((sum, row) => sum + Math.max(0, row.unread ?? 0), 0);
   lines.push(
-    `Total ${totalSent.toLocaleString()} sent` +
+    `Total ${formatSentCount(totalSent, totalUnread)}` +
       (overall != null ? ` · ${formatPct(overall)} bounce` : ""),
   );
   if ((input.unpausedBounceHolds ?? 0) > 0) {
@@ -469,9 +489,9 @@ function formatPulseCampaign(row: {
 function formatClientLine(row: ClientPulse, bounceWarn: number): string {
   const bits: string[] = [];
   if (row.sent <= 0) {
-    bits.push("0 sent");
+    bits.push(formatSentCount(0, row.unread));
   } else {
-    bits.push(`${row.sent.toLocaleString()} sent`);
+    bits.push(formatSentCount(row.sent, row.unread));
     const pct = bouncePercent(row.sent, row.bounced);
     if (pct != null) {
       const label = `${formatPct(pct)} bounce`;
